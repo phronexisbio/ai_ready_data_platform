@@ -4,8 +4,6 @@ The source of truth every other platform component (connectors, engine,
 feature repository) queries instead of inspecting files directly.
 """
 
-import hashlib
-import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -15,14 +13,9 @@ from sqlalchemy.orm import Session
 
 from catalog import schemas
 from catalog.db import engine, get_db
+from catalog.hashing import dataset_hash
 from catalog.models import Base, Dataset, Feature, File, Job, Pipeline
-
-
-def dataset_hash(manifest: dict) -> str:
-    """Hash the manifest as a whole (not per-file checksums) — this is what
-    makes the dataset-level content-addressed cache trustworthy later."""
-    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+from catalog.public_api import router as public_router
 
 
 @asynccontextmanager
@@ -32,6 +25,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI-Ready Data Platform — Metadata Catalog", lifespan=lifespan)
+app.include_router(public_router)
 
 
 @app.get("/health")

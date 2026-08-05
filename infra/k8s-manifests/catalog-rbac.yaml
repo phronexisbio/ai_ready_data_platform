@@ -1,0 +1,42 @@
+# Lets the catalog Deployment submit and poll Argo Workflows directly from
+# catalog/public_api.py's /public/upload + /public/workflows/{name} endpoints
+# (the public-upload path processes immediately instead of waiting for the
+# next engine.ingestion_service drain — see CLAUDE.md's "full version" notes).
+#
+# Separate from the `argo-workflow` ServiceAccount the Argo Helm chart
+# manages: that one is bound into Workflow *pod* specs for the emissary
+# executor's wait-sidecar RBAC (see CLAUDE.md Phase 2). This one is bound to
+# the catalog Deployment itself, so it can call the Kubernetes API to create
+# a Workflow object in the first place — a capability nothing needed until
+# now, since every other workflow submission path (engine/ingestion_service.py,
+# a developer's own kubectl) has always run from outside the cluster with a
+# full kubeconfig.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: catalog
+  namespace: data-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: catalog-workflow-submitter
+  namespace: data-platform
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: catalog-workflow-submitter
+  namespace: data-platform
+subjects:
+  - kind: ServiceAccount
+    name: catalog
+    namespace: data-platform
+roleRef:
+  kind: Role
+  name: catalog-workflow-submitter
+  apiGroup: rbac.authorization.k8s.io
