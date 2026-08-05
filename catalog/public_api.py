@@ -10,18 +10,23 @@ from here) so the tunnel only ever needs to expose this one service — the
 frontend never talks to MinIO or Prometheus directly.
 """
 
+import csv
 import hashlib
+import io
 import json
 import os
+import re
 import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from ftplib import FTP
 
 import boto3
 import requests
+from botocore import UNSIGNED
 from botocore.client import Config
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, UploadFile
 from fastapi import File as UploadFileParam
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -70,6 +75,27 @@ MODALITY_BY_SUFFIX = {
     ".txt": "text",
 }
 
+# Pull-by-source config — deliberately NOT a free-form "give me any URL"
+# endpoint. Each source either hits one fixed, hardcoded host (geo/sra/ftp)
+# or, for s3, only ever talks to real AWS with anonymous/unsigned
+# credentials (never a user-suppliable endpoint_url) — so a site visitor can
+# choose *what* to fetch but never *where from* in a way that could reach an
+# internal network address. See connectors/{geo,sra,s3,ftp}_connector.py for
+# the CLI/scheduled versions of the same fetch logic these mirror.
+GEO_ACC_URL = "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={accession}&targ=self&form=text&view=brief"
+SRA_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+SRA_ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+FTP_HOST = "ftp.ncbi.nlm.nih.gov"
+
+GEO_ACCESSION_RE = re.compile(r"^G[A-Z]{2}\d{1,10}$")  # GSE12345, GSM123, GPL96, GDS858
+SRA_ACCESSION_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
+S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+FTP_PATH_RE = re.compile(r"^/[\x20-\x7e]{1,510}$")  # must start with "/", printable ASCII, no traversal-friendly chars needed to block since ftplib can't escape the connection
+
+
+def _pull_dataset(source: str) -> str:
+    return f"public-pull-{source}-{uuid.uuid4().hex[:12]}"
+
 
 def require_api_key(x_api_key: str | None = Header(default=None)):
     if not PUBLIC_API_KEY:
@@ -102,7 +128,7 @@ def _client_ip(request: Request) -> str:
     return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "unknown")
 
 
-def _check_upload_rate_limit(ip: str) -> None:
+def _check_submission_rate_limit(ip: str) -> None:
     now = time.monotonic()
     window_start = now - UPLOAD_RATE_LIMIT_WINDOW_SECONDS
     recent = [t for t in _upload_timestamps[ip] if t >= window_start]
@@ -287,6 +313,58 @@ def source_sync_status(db: Session = Depends(get_db)):
     return [dict(r) for r in rows]
 
 
+def _land_register_submit(*, db: Session, source: str, dataset_id: str, filename: str, content: bytes, modality: str) -> dict:
+    """Shared by /upload and every /pull/{source} endpoint: land bytes into
+    MinIO, register one Dataset + one File row, submit the ingest-validate
+    workflow. Each call gets its own fresh dataset_id — these are independent
+    submissions, not versions of one manifest, so reusing a dataset_id across
+    them would misrepresent that relationship in the catalog."""
+    manifest = {"files": [filename]}
+    ds = Dataset(
+        dataset_id=dataset_id,
+        dataset_version=1,
+        dataset_hash=dataset_hash(manifest),
+        owner=source,
+        source=source,
+        manifest=manifest,
+    )
+    db.add(ds)
+    db.commit()
+    db.refresh(ds)
+
+    key = f"{source}/{dataset_id}/{filename}"
+    _minio_client().put_object(Bucket="landing", Key=key, Body=content)
+    location = f"landing/{key}"
+
+    f = File(
+        dataset_pk=ds.id,
+        source=source,
+        checksum=hashlib.sha256(content).hexdigest(),
+        modality=modality,
+        location=location,
+    )
+    db.add(f)
+    db.commit()
+    db.refresh(f)
+
+    workflow_name = _submit_workflow(
+        file_id=f.file_id,
+        source=source,
+        dataset_id=dataset_id,
+        dataset_version=1,
+        modality=modality,
+        location=location,
+    )
+
+    return {
+        "file_id": f.file_id,
+        "dataset_id": dataset_id,
+        "dataset_version": 1,
+        "modality": modality,
+        "workflow_name": workflow_name,
+    }
+
+
 @router.post("/upload")
 async def upload_file(
     request: Request,
@@ -294,15 +372,8 @@ async def upload_file(
     db: Session = Depends(get_db),
 ):
     """Land a visitor-submitted file through the real ingest -> validate ->
-    transform pipeline and return a workflow name the frontend can poll.
-
-    Every dataset registered here gets its own fresh `dataset_id`
-    (`public-upload-<uuid>`) rather than sharing one across uploads — these
-    are independent, unrelated submissions, not versions of the same
-    manifest, so reusing one dataset_id would misrepresent that relationship
-    in the catalog.
-    """
-    _check_upload_rate_limit(_client_ip(request))
+    transform pipeline and return a workflow name the frontend can poll."""
+    _check_submission_rate_limit(_client_ip(request))
 
     filename = file.filename or "upload"
     suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -319,51 +390,139 @@ async def upload_file(
     if not content.strip():
         raise HTTPException(400, "empty file")
 
-    dataset_id = f"public-upload-{uuid.uuid4().hex[:12]}"
-    manifest = {"files": [filename]}
-    ds = Dataset(
-        dataset_id=dataset_id,
-        dataset_version=1,
-        dataset_hash=dataset_hash(manifest),
-        owner="public-upload",
-        source="public-upload",
-        manifest=manifest,
-    )
-    db.add(ds)
-    db.commit()
-    db.refresh(ds)
-
-    key = f"public-upload/{dataset_id}/{filename}"
-    _minio_client().put_object(Bucket="landing", Key=key, Body=content)
-    location = f"landing/{key}"
-
-    f = File(
-        dataset_pk=ds.id,
-        source="public-upload",
-        checksum=hashlib.sha256(content).hexdigest(),
-        modality=modality,
-        location=location,
-    )
-    db.add(f)
-    db.commit()
-    db.refresh(f)
-
-    workflow_name = _submit_workflow(
-        file_id=f.file_id,
-        source="public-upload",
-        dataset_id=dataset_id,
-        dataset_version=1,
-        modality=modality,
-        location=location,
+    return _land_register_submit(
+        db=db, source="public-upload", dataset_id=f"public-upload-{uuid.uuid4().hex[:12]}", filename=filename, content=content, modality=modality
     )
 
-    return {
-        "file_id": f.file_id,
-        "dataset_id": dataset_id,
-        "dataset_version": 1,
-        "modality": modality,
-        "workflow_name": workflow_name,
-    }
+
+def _write_csv_row(header: list[str], row: list[str]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(header)
+    writer.writerow(row)
+    return buf.getvalue().encode("utf-8")
+
+
+def _fetch_geo(accession: str) -> tuple[bytes, str]:
+    resp = requests.get(GEO_ACC_URL.format(accession=accession), timeout=30)
+    resp.raise_for_status()
+    text_body = resp.content.decode("utf-8", errors="replace")
+
+    fields: dict[str, list[str]] = {}
+    for line in text_body.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.lstrip("^!#").strip()
+        value = value.strip()
+        if key:
+            fields.setdefault(key, []).append(value)
+    if not fields:
+        raise HTTPException(422, f"no metadata found for GEO accession {accession}")
+
+    header = list(fields.keys())
+    row = ["; ".join(v for v in values if v) for values in fields.values()]
+    return _write_csv_row(header, row), f"{accession}.csv"
+
+
+def _fetch_sra(accession: str) -> tuple[bytes, str]:
+    search_resp = requests.get(SRA_ESEARCH_URL, params={"db": "sra", "term": accession, "retmode": "json"}, timeout=30)
+    search_resp.raise_for_status()
+    id_list = search_resp.json()["esearchresult"]["idlist"]
+    if not id_list:
+        raise HTTPException(422, f"no SRA record found for accession {accession}")
+    uid = id_list[0]
+
+    summary_resp = requests.get(SRA_ESUMMARY_URL, params={"db": "sra", "id": uid, "retmode": "json"}, timeout=30)
+    summary_resp.raise_for_status()
+    record = summary_resp.json()["result"][uid]
+    if "error" in record:
+        raise HTTPException(422, f"SRA esummary error for {accession}: {record['error']}")
+
+    header = ["accession", "uid"] + [k for k in record if k != "uid"]
+    row = [accession, uid] + [str(record[k]) for k in header[2:]]
+    return _write_csv_row(header, row), f"{accession}.csv"
+
+
+def _fetch_s3(bucket: str, key: str) -> tuple[bytes, str]:
+    client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    try:
+        obj = client.get_object(Bucket=bucket, Key=key)
+    except client.exceptions.ClientError as e:
+        raise HTTPException(422, f"could not fetch s3://{bucket}/{key}: {e}")
+    if obj.get("ContentLength", 0) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"object too large — max {MAX_UPLOAD_BYTES // 1024}KB for public pulls")
+    content = obj["Body"].read()
+    return content, key.rsplit("/", 1)[-1]
+
+
+def _fetch_ftp(path: str) -> tuple[bytes, str]:
+    buf = io.BytesIO()
+
+    def _write(chunk: bytes):
+        if buf.tell() + len(chunk) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"file too large — max {MAX_UPLOAD_BYTES // 1024}KB for public pulls")
+        buf.write(chunk)
+
+    ftp = FTP(FTP_HOST, timeout=30)
+    try:
+        ftp.login()
+        ftp.retrbinary(f"RETR {path}", _write)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(422, f"could not fetch ftp://{FTP_HOST}{path}: {e}")
+    finally:
+        ftp.quit()
+    return buf.getvalue(), path.rsplit("/", 1)[-1]
+
+
+@router.post("/pull/geo")
+def pull_geo(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
+    _check_submission_rate_limit(_client_ip(request))
+    accession = str(body.get("accession", "")).strip().upper()
+    if not GEO_ACCESSION_RE.match(accession):
+        raise HTTPException(400, "accession must look like GSE12345, GSM123, GPL96, or GDS858")
+    content, filename = _fetch_geo(accession)
+    return _land_register_submit(db=db, source="geo", dataset_id=_pull_dataset("geo"), filename=filename, content=content, modality="tabular")
+
+
+@router.post("/pull/sra")
+def pull_sra(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
+    _check_submission_rate_limit(_client_ip(request))
+    accession = str(body.get("accession", "")).strip().upper()
+    if not SRA_ACCESSION_RE.match(accession):
+        raise HTTPException(400, "accession must be 3-20 alphanumeric characters, e.g. SRR000001")
+    content, filename = _fetch_sra(accession)
+    return _land_register_submit(db=db, source="sra", dataset_id=_pull_dataset("sra"), filename=filename, content=content, modality="tabular")
+
+
+@router.post("/pull/s3")
+def pull_s3(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
+    _check_submission_rate_limit(_client_ip(request))
+    bucket = str(body.get("bucket", "")).strip().lower()
+    key = str(body.get("key", "")).strip()
+    if not S3_BUCKET_RE.match(bucket):
+        raise HTTPException(400, "invalid S3 bucket name")
+    if not key or len(key) > 1024:
+        raise HTTPException(400, "key required, max 1024 characters")
+    content, filename = _fetch_s3(bucket, key)
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    modality = MODALITY_BY_SUFFIX.get(suffix, "text")  # anonymous public objects rarely have a recognized extension
+    return _land_register_submit(db=db, source="s3", dataset_id=_pull_dataset("s3"), filename=filename, content=content, modality=modality)
+
+
+@router.post("/pull/ftp")
+def pull_ftp(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
+    _check_submission_rate_limit(_client_ip(request))
+    path = str(body.get("path", "")).strip()
+    if not FTP_PATH_RE.match(path):
+        raise HTTPException(400, f"path must start with / and be a plain path on {FTP_HOST}")
+    content, filename = _fetch_ftp(path)
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    modality = MODALITY_BY_SUFFIX.get(suffix, "text")
+    return _land_register_submit(db=db, source="ftp", dataset_id=_pull_dataset("ftp"), filename=filename, content=content, modality=modality)
 
 
 @router.get("/uploads/{file_id}/status")
