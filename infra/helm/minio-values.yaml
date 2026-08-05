@@ -1,0 +1,35 @@
+mode: standalone
+
+rootUser: minioadmin
+rootPassword: minioadmin
+
+persistence:
+  enabled: true
+  storageClass: standard
+  size: 5Gi
+
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+
+buckets:
+  - name: landing
+    policy: none
+  - name: raw
+    policy: none
+  - name: validated
+    policy: none
+  - name: standardized
+    policy: none
+  - name: features
+    policy: none
+  - name: archive
+    policy: none
+  - name: rejected
+    policy: none
+
+consoleService:
+  type: ClusterIP
+service:
+  type: ClusterIP

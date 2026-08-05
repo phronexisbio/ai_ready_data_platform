@@ -1,0 +1,71 @@
+# Prometheus + Grafana (BUILD_PLAN.md §10 Phase 9). Alertmanager is disabled —
+# no on-call/paging need exists yet at this single-user stage, and BUILD_PLAN
+# §2 calls for "minimal setup cost." node-exporter/kube-state-metrics are kept
+# (cheap, and kube-state-metrics is what lets Grafana show K8s-level pod/job
+# state alongside app-level panels) since this is a shared host with plenty
+# of free RAM, not a resource-constrained one.
+alertmanager:
+  enabled: false
+
+grafana:
+  adminPassword: admin
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Auto-discover dashboard ConfigMaps labeled grafana_dashboard: "1"
+  # (observability/dashboards/, applied as ConfigMaps) instead of manually
+  # importing JSON through the UI.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      labelValue: "1"
+
+prometheus:
+  prometheusSpec:
+    retention: 3d
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+    # Discover ServiceMonitors/PodMonitors cluster-wide, not just ones with a
+    # release label — Argo's own chart doesn't know to label for this specific
+    # Prometheus release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

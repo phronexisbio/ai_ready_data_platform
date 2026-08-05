@@ -1,0 +1,17 @@
+auth:
+  username: catalog
+  password: catalog
+  database: catalog
+  postgresPassword: postgres
+
+primary:
+  persistence:
+    enabled: true
+    storageClass: standard
+    size: 2Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+
+architecture: standalone

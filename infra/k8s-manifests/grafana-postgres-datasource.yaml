@@ -1,0 +1,31 @@
+# Grafana datasource pointing directly at the catalog's Postgres database
+# (BUILD_PLAN.md §10 Phase 9) — cache hit rate and per-source sync status are
+# naturally SQL queries over Dataset/Feature rows, not things worth building
+# custom Prometheus instrumentation for when Grafana can query Postgres
+# directly. Picked up automatically by kube-prometheus-stack's Grafana sidecar
+# (grafana.sidecar.datasources, label grafana_datasource: "1").
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-postgres-datasource
+  namespace: data-platform
+  labels:
+    grafana_datasource: "1"
+data:
+  catalog-postgres.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Catalog (Postgres)
+        type: postgres
+        access: proxy
+        url: postgres-postgresql.data-platform.svc.cluster.local:5432
+        database: catalog
+        user: catalog
+        secureJsonData:
+          password: catalog
+        jsonData:
+          sslmode: disable
+          postgresVersion: 1800
+          timescaledb: false
+        isDefault: false
+        editable: true

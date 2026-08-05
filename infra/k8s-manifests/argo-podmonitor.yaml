@@ -1,0 +1,23 @@
+# Argo Workflows helm chart doesn't create a PodMonitor itself (unlike the
+# NATS chart's built-in one) despite the controller exposing a metrics port —
+# BUILD_PLAN.md §10 Phase 9's "pipeline success/failure" dashboard panel is
+# built directly from these (argo_workflows_count by phase), no custom
+# instrumentation needed.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: argo-workflows-controller
+  namespace: data-platform
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argo-workflows-workflow-controller
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      # The controller serves its metrics port over HTTPS (self-signed) —
+      # scraping over plain HTTP gets "Client sent an HTTP request to an
+      # HTTPS server" (400).
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true

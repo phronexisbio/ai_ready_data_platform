@@ -1,0 +1,158 @@
+# The Phase 2/3 ingest -> validate -> transform DAG (BUILD_PLAN.md §10). One
+# Workflow per file, submitted by engine/ingestion_service.py in response to a
+# platform.catalog.file.* NATS event. Kept as a reusable WorkflowTemplate so
+# the Ingestion Service only has to submit lightweight Workflow instances that
+# reference it with arguments, rather than generating the full DAG each time.
+#
+# `transform` only runs when `validate` actually passed (its
+# validation_result output is PASSED, not REJECTED) — same "don't spend
+# compute on data that already failed a cheap check" reasoning as running
+# input validation before transform at all (BUILD_PLAN §6).
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: ingest-validate
+  namespace: data-platform
+spec:
+  entrypoint: main
+  serviceAccountName: argo-workflow
+  arguments:
+    parameters:
+      - name: file-id
+      - name: source
+      - name: dataset-id
+      - name: dataset-version
+      - name: modality
+      - name: location
+      - name: representations
+        value: ""  # empty = pipeline default (see engine/pipelines/*/DEFAULT_REPRESENTATIONS)
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: ingest
+            template: ingest
+          - name: validate
+            template: validate
+            dependencies: [ingest]
+            arguments:
+              parameters:
+                - name: location
+                  value: "{{tasks.ingest.outputs.parameters.raw-location}}"
+          - name: transform
+            template: transform
+            dependencies: [validate]
+            when: "{{tasks.validate.outputs.parameters.result}} == PASSED"
+            arguments:
+              parameters:
+                - name: location
+                  value: "{{tasks.validate.outputs.parameters.validated-location}}"
+
+    - name: ingest
+      inputs:
+        parameters:
+          - name: file-id
+            value: "{{workflow.parameters.file-id}}"
+          - name: source
+            value: "{{workflow.parameters.source}}"
+          - name: dataset-id
+            value: "{{workflow.parameters.dataset-id}}"
+          - name: location
+            value: "{{workflow.parameters.location}}"
+      container:
+        image: engine-steps:phase2
+        imagePullPolicy: IfNotPresent
+        command: [python, -m, engine.steps.ingest]
+        args:
+          - --file-id
+          - "{{inputs.parameters.file-id}}"
+          - --source
+          - "{{inputs.parameters.source}}"
+          - --dataset-id
+          - "{{inputs.parameters.dataset-id}}"
+          - --location
+          - "{{inputs.parameters.location}}"
+        env:
+          - name: MINIO_ENDPOINT
+            value: http://minio.data-platform.svc.cluster.local:9000
+          - name: CATALOG_URL
+            value: http://catalog.data-platform.svc.cluster.local:8000
+      outputs:
+        parameters:
+          - name: raw-location
+            valueFrom:
+              path: /var/run/argo/outputs/raw_location.txt
+
+    - name: validate
+      inputs:
+        parameters:
+          - name: file-id
+            value: "{{workflow.parameters.file-id}}"
+          - name: modality
+            value: "{{workflow.parameters.modality}}"
+          - name: location
+      container:
+        image: engine-steps:phase2
+        imagePullPolicy: IfNotPresent
+        command: [python, -m, engine.steps.validate]
+        args:
+          - --file-id
+          - "{{inputs.parameters.file-id}}"
+          - --modality
+          - "{{inputs.parameters.modality}}"
+          - --location
+          - "{{inputs.parameters.location}}"
+        env:
+          - name: MINIO_ENDPOINT
+            value: http://minio.data-platform.svc.cluster.local:9000
+          - name: CATALOG_URL
+            value: http://catalog.data-platform.svc.cluster.local:8000
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              path: /var/run/argo/outputs/validation_result.txt
+          - name: validated-location
+            valueFrom:
+              path: /var/run/argo/outputs/validated_location.txt
+
+    - name: transform
+      inputs:
+        parameters:
+          - name: file-id
+            value: "{{workflow.parameters.file-id}}"
+          - name: source
+            value: "{{workflow.parameters.source}}"
+          - name: dataset-id
+            value: "{{workflow.parameters.dataset-id}}"
+          - name: dataset-version
+            value: "{{workflow.parameters.dataset-version}}"
+          - name: modality
+            value: "{{workflow.parameters.modality}}"
+          - name: representations
+            value: "{{workflow.parameters.representations}}"
+          - name: location
+      container:
+        image: engine-steps:phase2
+        imagePullPolicy: IfNotPresent
+        command: [python, -m, engine.steps.transform]
+        args:
+          - --file-id
+          - "{{inputs.parameters.file-id}}"
+          - --source
+          - "{{inputs.parameters.source}}"
+          - --dataset-id
+          - "{{inputs.parameters.dataset-id}}"
+          - --dataset-version
+          - "{{inputs.parameters.dataset-version}}"
+          - --modality
+          - "{{inputs.parameters.modality}}"
+          - --location
+          - "{{inputs.parameters.location}}"
+          - --representations
+          - "{{inputs.parameters.representations}}"
+        env:
+          - name: MINIO_ENDPOINT
+            value: http://minio.data-platform.svc.cluster.local:9000
+          - name: CATALOG_URL
+            value: http://catalog.data-platform.svc.cluster.local:8000

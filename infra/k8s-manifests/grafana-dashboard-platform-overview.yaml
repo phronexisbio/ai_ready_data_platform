@@ -1,0 +1,97 @@
+# Provisions observability/dashboards/platform-overview.json into Grafana
+# (BUILD_PLAN.md §10 Phase 9) via kube-prometheus-stack's dashboard sidecar
+# (label grafana_dashboard: "1"). This file is generated from the JSON —
+# after editing the JSON, regenerate rather than hand-editing the block below:
+#
+#   kubectl -n data-platform create configmap grafana-dashboard-platform-overview \
+#     --from-file=platform-overview.json=observability/dashboards/platform-overview.json \
+#     --dry-run=client -o yaml \
+#     | kubectl label -f - --local -o yaml grafana_dashboard=1 \
+#     > infra/k8s-manifests/grafana-dashboard-platform-overview.yaml
+#   kubectl apply -f infra/k8s-manifests/grafana-dashboard-platform-overview.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-platform-overview
+  namespace: data-platform
+  labels:
+    grafana_dashboard: "1"
+data:
+  platform-overview.json: |
+    {
+      "title": "AI-Ready Data Platform — Overview",
+      "uid": "platform-overview",
+      "timezone": "utc",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Argo Workflow phases (all-time counts)",
+          "description": "Pipeline success/failure at a glance — argo_workflows_total_count from the workflow-controller's own Prometheus metrics (BUILD_PLAN §10 Phase 9). A rising Failed/Error count means pipeline runs are failing.",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+          "targets": [
+            { "expr": "sum by (phase) (argo_workflows_total_count)", "legendFormat": "{{phase}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "mappings": [] },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "Failed" }, "properties": [{ "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] } }] },
+              { "matcher": { "id": "byName", "options": "Error" }, "properties": [{ "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] } }] },
+              { "matcher": { "id": "byName", "options": "Succeeded" }, "properties": [{ "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }] }
+            ]
+          },
+          "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 2,
+          "title": "Recently rejected files (input/output validation failures)",
+          "description": "A failed pipeline run, human-readable — status_detail/quality_detail already carries the exact reason (BUILD_PLAN §6), no pod logs needed.",
+          "type": "table",
+          "datasource": { "type": "postgres", "uid": "P1AF6DDD8BADD4461" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+          "targets": [
+            { "rawSql": "SELECT created_at AS time, source, location, status, status_detail AS reason\nFROM files\nWHERE status = 'rejected' AND $__timeFilter(created_at)\nORDER BY created_at DESC\nLIMIT 50", "format": "table", "refId": "A" }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Feature cache hit rate",
+          "description": "Content-addressed cache (BUILD_PLAN §10 Phase 5) hit rate over time — a low/zero period means the batch being processed is genuinely new content, or the cache isn't working.",
+          "type": "timeseries",
+          "datasource": { "type": "postgres", "uid": "P1AF6DDD8BADD4461" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "targets": [
+            { "rawSql": "SELECT\n  date_trunc('minute', created_at) AS time,\n  100.0 * count(*) FILTER (WHERE quality_checks_passed::jsonb ? 'cache_hit') / NULLIF(count(*), 0) AS cache_hit_rate_pct\nFROM features\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nORDER BY 1", "format": "time_series", "refId": "A" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "bars" } }, "overrides": [] }
+        },
+        {
+          "id": 4,
+          "title": "NATS queue depth — events pending for ingestion-service",
+          "description": "nats_consumer_num_pending for the durable 'ingestion-service' consumer on PLATFORM_EVENTS (BUILD_PLAN §10 Phase 9). Non-zero means connector-landed files are waiting to be drained — expected given engine/ingestion_service.py is still a manually-invoked batch (Phase 7 CLAUDE.md note), not a bug by itself, but a growing trend is worth watching.",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "targets": [
+            { "expr": "nats_consumer_num_pending{consumer_name=\"ingestion-service\"}", "legendFormat": "pending events", "refId": "A" }
+          ],
+          "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+        },
+        {
+          "id": 5,
+          "title": "Per-source sync status",
+          "description": "Most recent dataset registered per connector source (BUILD_PLAN §10 Phase 7) — last_synced going stale for a source that should be running nightly is the signal to check its CronWorkflow.",
+          "type": "table",
+          "datasource": { "type": "postgres", "uid": "P1AF6DDD8BADD4461" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
+          "targets": [
+            { "rawSql": "SELECT DISTINCT ON (source)\n  source,\n  dataset_id,\n  dataset_version,\n  created_at AS last_synced,\n  now() - created_at AS time_since_last_sync\nFROM datasets\nORDER BY source, created_at DESC", "format": "table", "refId": "A" }
+          ]
+        }
+      ]
+    }

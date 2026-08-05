@@ -1,0 +1,33 @@
+# Nightly PubChem sync (BUILD_PLAN.md §10 Phase 7). Same shape as
+# chembl-sync-cronworkflow.yaml — see that file's comment for why this is a
+# single-step Workflow rather than a WorkflowTemplate DAG.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: pubchem-nightly-sync
+  namespace: data-platform
+spec:
+  schedules:
+    - "15 2 * * *"
+  timezone: "UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  workflowSpec:
+    serviceAccountName: argo-workflow
+    entrypoint: sync
+    templates:
+      - name: sync
+        container:
+          image: connectors:phase7
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, connectors.pubchem_connector]
+          args: ["--dataset-id", "pubchem-nightly-sync"]
+          env:
+            - name: MINIO_ENDPOINT
+              value: http://minio.data-platform.svc.cluster.local:9000
+            - name: NATS_URL
+              value: nats://nats.data-platform.svc.cluster.local:4222
+            - name: CATALOG_URL
+              value: http://catalog.data-platform.svc.cluster.local:8000

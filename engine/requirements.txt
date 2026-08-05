@@ -1,0 +1,7 @@
+requests==2.32.3
+boto3==1.35.90
+rdkit==2026.3.5
+biopython==1.87
+tifffile==2026.7.31
+numpy==2.5.1
+ray[default]==2.52.0

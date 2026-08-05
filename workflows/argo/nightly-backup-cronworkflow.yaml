@@ -1,0 +1,59 @@
+# Nightly backup (BUILD_PLAN.md §10 Phase 10): pg_dump of the catalog +
+# mc mirror of the raw/ and features/ data lake zones into MinIO's backups/
+# bucket. Scheduled after both connector syncs (chembl 2am, pubchem 2:15am
+# UTC — see chembl/pubchem-sync-cronworkflow.yaml) so a night's newly-synced
+# data is included.
+#
+# "or off-box" per BUILD_PLAN §10: this mirrors within the same MinIO
+# instance, not to genuinely separate infrastructure — there's no second
+# object store available in this environment. That protects against
+# catalog-level mistakes (bad migration, accidental deletes) but not against
+# the MinIO instance itself being lost; genuine off-box storage is a real gap,
+# noted rather than silently assumed away.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: nightly-backup
+  namespace: data-platform
+spec:
+  schedules:
+    - "0 3 * * *"
+  timezone: "UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  workflowSpec:
+    serviceAccountName: argo-workflow
+    entrypoint: backup
+    templates:
+      - name: backup
+        container:
+          image: backup:phase10
+          imagePullPolicy: IfNotPresent
+          # Explicit command: the emissary executor otherwise tries to look up
+          # the image's entrypoint from Docker Hub, which fails for images
+          # that only exist locally/in kind (never pushed to a registry).
+          command: ["/usr/local/bin/backup.sh"]
+          env:
+            - name: POSTGRES_HOST
+              value: postgres-postgresql.data-platform.svc.cluster.local
+            - name: POSTGRES_USER
+              value: catalog
+            - name: POSTGRES_PASSWORD
+              value: catalog
+            - name: POSTGRES_DB
+              value: catalog
+            - name: MINIO_ENDPOINT
+              value: http://minio.data-platform.svc.cluster.local:9000
+            - name: MINIO_ACCESS_KEY
+              value: minioadmin
+            - name: MINIO_SECRET_KEY
+              value: minioadmin
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

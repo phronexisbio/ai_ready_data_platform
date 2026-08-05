@@ -1,0 +1,29 @@
+# Loki + Promtail (BUILD_PLAN.md §10 Phase 9: "logs from day one, minimal
+# setup cost"). loki-stack bundles both in one chart — simplest path to log
+# aggregation without hand-wiring a separate log shipper.
+loki:
+  persistence:
+    enabled: true
+    storageClassName: standard
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+promtail:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# Grafana is already installed via kube-prometheus-stack — just point it at
+# this Loki instance as a datasource instead of deploying a second Grafana.
+grafana:
+  enabled: false

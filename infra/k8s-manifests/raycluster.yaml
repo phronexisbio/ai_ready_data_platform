@@ -1,0 +1,93 @@
+# CPU-only RayCluster (BUILD_PLAN.md §10 Phase 8). This host has a real GPU
+# but it's shared, has no nvidia-container-runtime wired into Docker, and
+# passthrough into `kind` would require sudo host changes + a Docker restart
+# that drops every running container — out of scope to do unilaterally. The
+# code (engine/ray_tasks.py) is written to be GPU-ready regardless: each
+# @ray.remote task declares its GPU need via the RAY_TASK_NUM_GPUS env var
+# rather than a hardcoded number, so moving to a real GPU cluster means
+# changing the two places marked "# GPU:" below plus that one env var —
+# never the task code itself.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: raycluster
+  namespace: data-platform
+spec:
+  rayVersion: "2.52.0"
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      # Without this the head contributes CPU capacity too, and Ray happily
+      # schedules tasks there — undermining the whole point of proving a
+      # batch spreads across the *worker* pods specifically.
+      num-cpus: "0"
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: engine-steps:phase2
+            imagePullPolicy: IfNotPresent
+            # No command/args: KubeRay generates the `ray start` invocation
+            # itself from rayStartParams above. Specifying our own here
+            # doesn't override it — it gets prepended with `&&`, and since
+            # our version had `--block`, KubeRay's real (correctly
+            # configured, e.g. --num-cpus=0) invocation never even ran.
+            env:
+              # Ray worker subprocesses don't inherit /app on sys.path the way
+              # `python -m engine...` does for the driver — without this,
+              # @ray.remote tasks fail with "No module named 'engine'".
+              - name: PYTHONPATH
+                value: /app
+              - name: MINIO_ENDPOINT
+                value: http://minio.data-platform.svc.cluster.local:9000
+              - name: CATALOG_URL
+                value: http://catalog.data-platform.svc.cluster.local:8000
+              # GPU: on a real GPU cluster, set to the per-task GPU share (e.g. "1").
+              - name: RAY_TASK_NUM_GPUS
+                value: "0"
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+            resources:
+              requests:
+                cpu: "500m"
+                memory: 1Gi
+              limits:
+                cpu: "1"
+                memory: 2Gi
+  workerGroupSpecs:
+    - groupName: cpu-workers
+      replicas: 2
+      minReplicas: 2
+      maxReplicas: 2
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: engine-steps:phase2
+              imagePullPolicy: IfNotPresent
+              # See head group's comment: no command/args, KubeRay generates it.
+              env:
+                - name: PYTHONPATH
+                  value: /app
+                - name: MINIO_ENDPOINT
+                  value: http://minio.data-platform.svc.cluster.local:9000
+                - name: CATALOG_URL
+                  value: http://catalog.data-platform.svc.cluster.local:8000
+                - name: RAY_TASK_NUM_GPUS
+                  value: "0"
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: 1Gi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi
+                  # GPU: add `nvidia.com/gpu: "1"` here (and to requests) on a
+                  # real GPU node pool with the NVIDIA k8s device plugin
+                  # installed. Nothing else in this manifest changes.

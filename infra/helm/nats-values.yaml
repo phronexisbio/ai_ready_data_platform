@@ -1,0 +1,29 @@
+config:
+  jetstream:
+    enabled: true
+    fileStore:
+      enabled: true
+      dir: /data
+      pvc:
+        enabled: true
+        size: 2Gi
+        storageClassName: standard
+
+  cluster:
+    enabled: false
+
+container:
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+
+# Prometheus queue-depth metrics (BUILD_PLAN.md §10 Phase 9) — converts the
+# monitoring port's JSON (config.monitor, already enabled by default) into
+# Prometheus exposition format. `podMonitor.enabled` auto-creates the
+# PodMonitor CRD so kube-prometheus-stack's Prometheus discovers it without
+# a hand-written scrape config.
+promExporter:
+  enabled: true
+  podMonitor:
+    enabled: true

@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  namespace: data-platform
+  labels:
+    app: catalog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog
+  template:
+    metadata:
+      labels:
+        app: catalog
+    spec:
+      containers:
+        - name: catalog
+          image: catalog:phase1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: postgresql+psycopg2://catalog:catalog@postgres-postgresql.data-platform.svc.cluster.local:5432/catalog
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 50m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  namespace: data-platform
+spec:
+  selector:
+    app: catalog
+  ports:
+    - port: 8000
+      targetPort: 8000

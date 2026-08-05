@@ -1,0 +1,20 @@
+# Single-namespace mode: the controller only watches/manages Workflows in
+# data-platform, matching the "everything in one namespace" simplicity of
+# the rest of this cluster at this stage (BUILD_PLAN §8 — multi-tenancy is
+# explicitly deferred).
+singleNamespace: true
+
+controller:
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+
+# UI not needed yet — verification happens via kubectl. Cuts pod count/RAM.
+server:
+  enabled: false
+
+# No workflow-scoped SSO/RBAC concerns yet (single user).
+workflow:
+  serviceAccount:
+    create: true

@@ -1,0 +1,33 @@
+# Nightly ChEMBL sync (BUILD_PLAN.md §10 Phase 7). Runs the connector as a
+# single-step Workflow on a schedule — no WorkflowTemplate needed since a
+# connector run isn't a DAG, unlike ingest-validate-template.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: chembl-nightly-sync
+  namespace: data-platform
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: "UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  workflowSpec:
+    serviceAccountName: argo-workflow
+    entrypoint: sync
+    templates:
+      - name: sync
+        container:
+          image: connectors:phase7
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, connectors.chembl_connector]
+          args: ["--dataset-id", "chembl-nightly-sync"]
+          env:
+            - name: MINIO_ENDPOINT
+              value: http://minio.data-platform.svc.cluster.local:9000
+            - name: NATS_URL
+              value: nats://nats.data-platform.svc.cluster.local:4222
+            - name: CATALOG_URL
+              value: http://catalog.data-platform.svc.cluster.local:8000
