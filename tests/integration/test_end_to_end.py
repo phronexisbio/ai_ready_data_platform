@@ -17,6 +17,7 @@ genuine multi-source coverage (BUILD_PLAN's own wording), not two
 differently-labeled local connectors pretending to be different sources.
 """
 
+import base64
 import subprocess
 import time
 import uuid
@@ -149,10 +150,25 @@ def _cleanup(dataset_id: str):
     """Best-effort teardown so this test leaves no trace in the catalog —
     matches the hygiene maintained throughout manual verification."""
     try:
+        # Phase 17 (BUILD_PLAN_COMMERCIAL.md): this previously hardcoded
+        # PGPASSWORD=catalog — the pre-Phase-12 password, silently stale
+        # (and silently swallowed by the except below) since Phase 12
+        # rotated real passwords in. Also now targets pgpool, not a specific
+        # postgresql pod directly, since only pgpool is guaranteed to be the
+        # current primary after the Phase 17 HA cutover.
+        pg_password = subprocess.run(
+            [
+                "kubectl", "-n", "data-platform", "get", "secret", "postgres-ha-credentials",
+                "-o", "jsonpath={.data.password}",
+            ],
+            capture_output=True, timeout=10, check=True,
+        ).stdout
+        pg_password = base64.b64decode(pg_password).decode()
         subprocess.run(
             [
                 "kubectl", "-n", "data-platform", "exec", "postgres-postgresql-0", "--",
-                "env", "PGPASSWORD=catalog", "psql", "-U", "catalog", "-d", "catalog", "-c",
+                "env", f"PGPASSWORD={pg_password}", "psql",
+                "-h", "postgres-pgpool", "-U", "catalog", "-d", "catalog", "-c",
                 f"DELETE FROM features WHERE dataset_id = '{dataset_id}'; "
                 f"DELETE FROM files WHERE dataset_pk IN (SELECT id FROM datasets WHERE dataset_id = '{dataset_id}'); "
                 f"DELETE FROM datasets WHERE dataset_id = '{dataset_id}';",

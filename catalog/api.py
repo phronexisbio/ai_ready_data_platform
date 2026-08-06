@@ -6,7 +6,6 @@ feature repository) queries instead of inspecting files directly.
 
 import hmac
 import os
-from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
@@ -14,9 +13,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from catalog import schemas
-from catalog.db import engine, get_db
+from catalog.db import get_db
 from catalog.hashing import dataset_hash
-from catalog.models import Base, Dataset, Feature, File, Job, Pipeline
+from catalog.models import Dataset, Feature, File, Job, Pipeline
 from catalog.public_api import router as public_router
 
 # Phase 13 (BUILD_PLAN_COMMERCIAL.md): these internal endpoints previously had
@@ -38,13 +37,13 @@ def require_internal_secret(x_internal_secret: str | None = Header(default=None)
 internal_router = APIRouter(dependencies=[Depends(require_internal_secret)])
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
-
-
-app = FastAPI(title="AI-Ready Data Platform — Metadata Catalog", lifespan=lifespan)
+# Phase 17 (BUILD_PLAN_COMMERCIAL.md): schema creation used to happen here via
+# Base.metadata.create_all() on every startup — replaced by a real migration
+# tool (catalog/alembic/) so schema changes against live data go through
+# `alembic upgrade head`, not create_all-or-hand-written-SQL. Migrations run
+# in an initContainer (infra/k8s-manifests/catalog.yaml) before this app ever
+# starts, so there's nothing left for a lifespan hook to do.
+app = FastAPI(title="AI-Ready Data Platform — Metadata Catalog")
 app.include_router(public_router)
 # internal_router is included at the bottom of this file, not here — its
 # routes are only added to it by the @internal_router... decorators further

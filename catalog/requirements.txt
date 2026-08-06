@@ -7,3 +7,4 @@ requests==2.32.3
 boto3==1.35.90
 kubernetes==31.0.0
 python-multipart==0.0.20
+alembic==1.19.0

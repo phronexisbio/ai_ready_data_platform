@@ -1,0 +1,85 @@
+# Phase 17 (BUILD_PLAN_COMMERCIAL.md): replaces the standalone
+# bitnami/postgresql chart (infra/helm/postgres-values.yaml, now retired)
+# with bitnami/postgresql-ha — repmgr gives real automatic primary failover,
+# which plain bitnami/postgresql's `architecture: replication` does not (it's
+# streaming replication with manual promotion only).
+#
+# fullnameOverride reproduces the old chart's resource names on purpose:
+# the postgresql StatefulSet/Service stay `postgres-postgresql` (same
+# hostname `tests/integration/test_end_to_end.py`'s direct-pod exec already
+# used), and pgpool becomes `postgres-pgpool` — the new endpoint every
+# consumer (catalog's DATABASE_URL, the nightly backup CronWorkflow, the
+# Grafana Postgres datasource) must use instead, since only pgpool is
+# failover-aware. Never point a consumer at the raw `postgres-postgresql`
+# service for writes — it round-robins across all nodes including replicas,
+# which don't accept writes.
+fullnameOverride: postgres
+
+postgresql:
+  # bitnami/postgresql-repmgr on the free "bitnami/" Docker Hub org 404s as
+  # of the August 2025 Bitnami Secure Images cutover (pinned version tags
+  # were pulled from the free tier) — `bitnamilegacy/` is Bitnami's own
+  # replacement org carrying the same pinned tags for free, confirmed by a
+  # real `docker pull` against both orgs before writing this.
+  image:
+    repository: bitnamilegacy/postgresql-repmgr
+  # 3 is repmgr's own stated minimum for quorum when promoting a new primary
+  # (see the chart's own values.yaml comment) — 2 risks split-brain.
+  replicaCount: 3
+  # Matches the retired standalone chart's auth.username/auth.database
+  # (infra/helm/postgres-values.yaml) — without these, the chart bootstraps
+  # only a single default `postgres` superuser/database at initdb time, not
+  # the `catalog` role/database the app actually connects as. Found this the
+  # hard way: a first pass without these two lines left the cluster with no
+  # `catalog` role at all, since initdb-time user/db creation only runs once
+  # against an empty data directory.
+  username: catalog
+  database: catalog
+  existingSecret: postgres-ha-credentials
+  usePasswordFiles: true
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 1Gi
+      cpu: 500m
+
+# No witness node: 3 full postgresql replicas already gives repmgr quorum
+# without a 4th, data-less node to operate.
+witness:
+  replicaCount: 0
+
+pgpool:
+  # Same bitnamilegacy note as postgresql.image above.
+  image:
+    repository: bitnamilegacy/pgpool
+  # Found live: pgpool's default read/write splitting sent catalog/api.py's
+  # post-commit db.refresh() SELECT to a standby, which hadn't yet replicated
+  # the just-committed INSERT — a genuine read-your-own-write race, not a
+  # transient fluke (`disableLoadBalancingOnWrite: transaction` only pins
+  # reads *inside* the same transaction as a write; a follow-up statement
+  # after commit is a new transaction, free to land on a lagging standby).
+  # This app has no read-scaling need pgpool's load balancing would actually
+  # serve, so the correct fix is disabling it outright — all traffic goes to
+  # the primary, automatic failover (which is independent of load balancing)
+  # is unaffected.
+  useLoadBalancing: false
+  # 2, not 1: a single pgpool would just move the single-point-of-failure
+  # problem from Postgres onto the router in front of it. Pgpool itself is
+  # stateless, so this is cheap.
+  replicaCount: 2
+  existingSecret: postgres-ha-credentials
+  usePasswordFiles: true
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+    limits:
+      memory: 512Mi
+      cpu: 250m
+
+persistence:
+  enabled: true
+  storageClass: standard
+  size: 2Gi

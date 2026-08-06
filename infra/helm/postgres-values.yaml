@@ -1,3 +1,8 @@
+# RETIRED as of Phase 17 (BUILD_PLAN_COMMERCIAL.md) — the standalone
+# bitnami/postgresql release this values file drove was replaced by the
+# bitnami/postgresql-ha release (infra/helm/postgres-ha-values.yaml), for
+# real automatic primary failover via repmgr. Kept here only as a record of
+# what v2/Phase 12 originally deployed; not applied to the live cluster.
 auth:
   username: catalog
   database: catalog

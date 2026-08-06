@@ -63,8 +63,11 @@ spec:
             - name: tmp
               mountPath: /tmp
           env:
+            # Phase 17 (BUILD_PLAN_COMMERCIAL.md): pgpool, not the raw
+            # postgresql service — pgpool is the failover-aware endpoint that
+            # always routes to whichever node is currently primary.
             - name: POSTGRES_HOST
-              value: postgres-postgresql.data-platform.svc.cluster.local
+              value: postgres-pgpool.data-platform.svc.cluster.local
             - name: POSTGRES_USER
               value: catalog
             # Phase 12 (BUILD_PLAN_COMMERCIAL.md): credentials come from Secrets

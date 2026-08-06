@@ -1,4 +1,13 @@
-mode: standalone
+# Phase 17 (BUILD_PLAN_COMMERCIAL.md): erasure-coded distributed mode
+# (4 nodes, 1 drive each — the chart's own minimum for erasure coding)
+# replaces the single-instance standalone mode. Still the same chart/release
+# name (`minio`), so every consumer's `minio.data-platform.svc.cluster.local`
+# hostname is unchanged — cut over by snapshotting all buckets out with `mc
+# mirror`, reinstalling under this mode, then mirroring the snapshot back in.
+mode: distributed
+replicas: 4
+drivesPerNode: 1
+pools: 1
 
 # Phase 12 (BUILD_PLAN_COMMERCIAL.md): root credentials live in the
 # `minio-credentials` Secret (keys `rootUser`/`rootPassword`), created
@@ -45,6 +54,12 @@ buckets:
   - name: archive
     policy: none
   - name: rejected
+    policy: none
+  # Phase 17: previously only ever created ad hoc by infra/backup/backup.sh's
+  # own `mc mb --ignore-existing` — declared explicitly now that it holds
+  # real nightly backup data worth tracking the same way the data-lake zones
+  # already are.
+  - name: backups
     policy: none
 
 consoleService:

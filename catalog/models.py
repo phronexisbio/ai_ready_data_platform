@@ -130,7 +130,12 @@ class Feature(Base):
     quality_status: Mapped[str] = mapped_column(String, nullable=False)
     quality_checks_passed: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     quality_detail: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Phase 17 (BUILD_PLAN_COMMERCIAL.md): filtered/ordered on by
+    # GET /features?produced_since=&produced_before= (used by
+    # engine/feature_repository/client.py) but had no index — added via a
+    # real Alembic migration, not create_all, to prove the mechanism works
+    # against a database with existing rows.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
 class Job(Base):

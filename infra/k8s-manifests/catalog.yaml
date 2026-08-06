@@ -26,6 +26,31 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      # Phase 17 (BUILD_PLAN_COMMERCIAL.md): schema changes now go through
+      # Alembic (catalog/alembic/), not Base.metadata.create_all() on every
+      # app startup. Same initContainer pattern already used for NATS's
+      # Phase 16 chown fix — migrations run to completion once, before the
+      # main container (which no longer touches schema at all) ever starts.
+      initContainers:
+        - name: migrate
+          image: catalog:phase1
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "-c", "alembic.ini", "upgrade", "head"]
+          workingDir: /app
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: database-url
       containers:
         - name: catalog
           image: catalog:phase1

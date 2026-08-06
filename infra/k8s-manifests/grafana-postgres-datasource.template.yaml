@@ -33,7 +33,9 @@ stringData:
       - name: Catalog (Postgres)
         type: postgres
         access: proxy
-        url: postgres-postgresql.data-platform.svc.cluster.local:5432
+        # Phase 17 (BUILD_PLAN_COMMERCIAL.md): pgpool, not the raw postgresql
+        # service — see nightly-backup-cronworkflow.yaml's identical comment.
+        url: postgres-pgpool.data-platform.svc.cluster.local:5432
         database: catalog
         user: catalog
         secureJsonData:
