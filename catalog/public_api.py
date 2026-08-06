@@ -53,6 +53,18 @@ MAX_UPLOAD_BYTES = 512 * 1024  # 512KB — a demo upload, not a bulk loader
 UPLOAD_RATE_LIMIT_MAX = 5
 UPLOAD_RATE_LIMIT_WINDOW_SECONDS = 600  # 5 uploads / 10 min / client
 
+# /upload-batch limits — per-file cap stays MAX_UPLOAD_BYTES (unchanged safety
+# posture for the one write path the tunnel exposes), these bound the *batch*
+# on top of that: how many files and how many total bytes one request can push.
+MAX_BATCH_FILES = 20
+MAX_BATCH_TOTAL_BYTES = 5 * 1024 * 1024  # 5MB total per batch request
+
+# Raw-content preview cap — unlike the public-upload write path, files landed
+# by scheduled connectors (chembl/pubchem/uniprot syncs) have no size ceiling,
+# so this read path needs its own guard against being used to tunnel an
+# arbitrarily large object out through the public API one preview at a time.
+RAW_PREVIEW_MAX_BYTES = 200 * 1024
+
 # Same shape as connectors/local_connector.py's suffix table — duplicated
 # rather than imported because catalog and connectors ship as separate
 # Docker images and neither depends on the other.
@@ -255,9 +267,83 @@ def dataset_versions(dataset_id: str, db: Session = Depends(get_db)):
     ]
 
 
+def _file_dict(f: File, dataset_id: str, dataset_version: int) -> dict:
+    return {
+        "file_id": f.file_id,
+        "dataset_id": dataset_id,
+        "dataset_version": dataset_version,
+        "source": f.source,
+        "modality": f.modality,
+        "status": f.status,
+        "status_detail": f.status_detail,
+        "checksum": f.checksum,
+        "location": f.location,
+        "pipeline_version": f.pipeline_version,
+        "created_at": f.created_at,
+    }
+
+
+@router.get("/datasets/{dataset_id}/files")
+def dataset_files(dataset_id: str, version: int | None = None, db: Session = Depends(get_db)):
+    """Per-file pipeline status (landed -> raw -> validated/rejected, then a
+    Feature row once transform runs) for a dataset version. The manifest on
+    GET /datasets/{id}/versions only lists filenames — this is what actually
+    shows where each one currently sits in the pipeline, the same status
+    field workflows/argo/ingest-validate-template.yaml's steps set."""
+    q = select(Dataset).where(Dataset.dataset_id == dataset_id)
+    if version is not None:
+        q = q.where(Dataset.dataset_version == version)
+    else:
+        q = q.order_by(Dataset.dataset_version.desc())
+    ds = db.execute(q).scalars().first()
+    if ds is None:
+        raise HTTPException(404, f"dataset {dataset_id} not found")
+    files = db.execute(select(File).where(File.dataset_pk == ds.id).order_by(File.created_at)).scalars().all()
+    return [_file_dict(f, ds.dataset_id, ds.dataset_version) for f in files]
+
+
+@router.get("/files/{file_id}")
+def get_file_detail(file_id: str, db: Session = Depends(get_db)):
+    f = db.execute(select(File).where(File.file_id == file_id)).scalar_one_or_none()
+    if f is None:
+        raise HTTPException(404, f"file {file_id} not found")
+    ds = db.execute(select(Dataset).where(Dataset.id == f.dataset_pk)).scalar_one()
+    return _file_dict(f, ds.dataset_id, ds.dataset_version)
+
+
+@router.get("/files/{file_id}/raw")
+def get_file_raw(file_id: str, db: Session = Depends(get_db)):
+    """Bounded raw-content preview of the file as it landed, decoded best-effort
+    as UTF-8 (binary formats like .tiff just render as replacement characters —
+    this is a text preview, not a viewer for every modality). Capped at
+    RAW_PREVIEW_MAX_BYTES via an S3 Range request so this read path can't be
+    used to pull an arbitrarily large connector-synced object through the
+    tunnel — /upload's own size cap only bounds the public *write* path."""
+    f = db.execute(select(File).where(File.file_id == file_id)).scalar_one_or_none()
+    if f is None:
+        raise HTTPException(404, f"file {file_id} not found")
+    bucket, _, key = f.location.partition("/")
+    try:
+        obj = _minio_client().get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{RAW_PREVIEW_MAX_BYTES - 1}")
+        content = obj["Body"].read()
+    except Exception as e:
+        raise HTTPException(502, f"could not fetch file content: {e}")
+    content_range = obj.get("ContentRange", "")
+    total_size = int(content_range.rsplit("/", 1)[-1]) if "/" in content_range else len(content)
+    return {
+        "file_id": file_id,
+        "location": f.location,
+        "modality": f.modality,
+        "content": content.decode("utf-8", errors="replace"),
+        "truncated": total_size > len(content),
+        "total_size_bytes": total_size,
+    }
+
+
 @router.get("/features")
 def search_features(
     dataset_id: str | None = None,
+    source_file_id: str | None = None,
     modality: str | None = None,
     representation_type: str | None = None,
     quality_status: str | None = "passed",
@@ -267,6 +353,8 @@ def search_features(
     q = select(Feature)
     if dataset_id:
         q = q.where(Feature.dataset_id == dataset_id)
+    if source_file_id:
+        q = q.where(Feature.source_file_id == source_file_id)
     if modality:
         q = q.where(Feature.modality == modality)
     if representation_type:
@@ -393,6 +481,117 @@ async def upload_file(
     return _land_register_submit(
         db=db, source="public-upload", dataset_id=f"public-upload-{uuid.uuid4().hex[:12]}", filename=filename, content=content, modality=modality
     )
+
+
+def _land_register_submit_batch(*, db: Session, source: str, dataset_id: str, items: list[tuple[str, bytes, str]]) -> dict:
+    """Batch counterpart to _land_register_submit: one Dataset version covering
+    every file in the batch (mirroring how connectors/base.py's Connector.run()
+    registers one Dataset version + one File row per landed file for a single
+    sync), rather than a separate Dataset per file the way single-file /upload
+    does — a batch is genuinely one submission, not N independent ones."""
+    manifest = {"files": [filename for filename, _, _ in items]}
+    ds = Dataset(
+        dataset_id=dataset_id,
+        dataset_version=1,
+        dataset_hash=dataset_hash(manifest),
+        owner=source,
+        source=source,
+        manifest=manifest,
+    )
+    db.add(ds)
+    db.commit()
+    db.refresh(ds)
+
+    minio = _minio_client()
+    files_out = []
+    for filename, content, modality in items:
+        key = f"{source}/{dataset_id}/{filename}"
+        minio.put_object(Bucket="landing", Key=key, Body=content)
+        location = f"landing/{key}"
+
+        f = File(
+            dataset_pk=ds.id,
+            source=source,
+            checksum=hashlib.sha256(content).hexdigest(),
+            modality=modality,
+            location=location,
+        )
+        db.add(f)
+        db.commit()
+        db.refresh(f)
+
+        workflow_name = _submit_workflow(
+            file_id=f.file_id,
+            source=source,
+            dataset_id=dataset_id,
+            dataset_version=1,
+            modality=modality,
+            location=location,
+        )
+        files_out.append(
+            {"filename": filename, "file_id": f.file_id, "modality": modality, "workflow_name": workflow_name}
+        )
+
+    return {"dataset_id": dataset_id, "dataset_version": 1, "files": files_out}
+
+
+@router.post("/upload-batch")
+async def upload_batch(
+    request: Request,
+    files: list[UploadFile] = UploadFileParam(...),
+    db: Session = Depends(get_db),
+):
+    """Land multiple visitor-submitted files as one dataset in a single request,
+    each through the real ingest -> validate -> transform pipeline. Counts as one
+    submission against the rate limiter (like /pull/*) since charging a batch of
+    N files N budget slots would defeat the point of having this endpoint."""
+    _check_submission_rate_limit(_client_ip(request))
+
+    if not files:
+        raise HTTPException(400, "no files provided")
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(400, f"too many files — max {MAX_BATCH_FILES} per batch")
+
+    valid: list[tuple[str, bytes, str]] = []
+    errors: list[dict] = []
+    total_bytes = 0
+
+    for file in files:
+        filename = file.filename or "upload"
+        suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        modality = MODALITY_BY_SUFFIX.get(suffix)
+        if modality is None:
+            errors.append({"filename": filename, "error": f"unsupported file type '{suffix}'"})
+            continue
+
+        content = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            errors.append({"filename": filename, "error": f"file too large — max {MAX_UPLOAD_BYTES // 1024}KB per file"})
+            continue
+        if not content.strip():
+            errors.append({"filename": filename, "error": "empty file"})
+            continue
+
+        prospective_total = total_bytes + len(content)
+        if prospective_total > MAX_BATCH_TOTAL_BYTES:
+            errors.append(
+                {"filename": filename, "error": f"batch total too large — max {MAX_BATCH_TOTAL_BYTES // (1024 * 1024)}MB per batch"}
+            )
+            continue
+        total_bytes = prospective_total
+        valid.append((filename, content, modality))
+
+    if not valid:
+        raise HTTPException(400, f"no valid files in batch: {errors}")
+
+    result = _land_register_submit_batch(
+        db=db,
+        source="public-upload",
+        dataset_id=f"public-upload-batch-{uuid.uuid4().hex[:12]}",
+        items=valid,
+    )
+    result["errors"] = errors
+    return result
 
 
 def _write_csv_row(header: list[str], row: list[str]) -> bytes:
