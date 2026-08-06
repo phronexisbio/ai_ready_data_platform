@@ -26,8 +26,27 @@ spec:
   workflowSpec:
     serviceAccountName: argo-workflow
     entrypoint: backup
+    # Phase 16 (BUILD_PLAN_COMMERCIAL.md): stable label for NetworkPolicy
+    # targeting, matching the other workflow templates' convention.
+    podMetadata:
+      labels:
+        network-role: backup
+    volumes:
+      - name: tmp
+        emptyDir: {}
     templates:
       - name: backup
+        # runAsUser 999: the postgres:18 base image's own built-in "postgres"
+        # user — reuses an identity the image already knows how to run pg_dump
+        # under, rather than an arbitrary UID that might not have the right
+        # permissions on files the image itself laid down.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          runAsGroup: 999
+          fsGroup: 999
+          seccompProfile:
+            type: RuntimeDefault
         container:
           image: backup:phase10
           imagePullPolicy: IfNotPresent
@@ -35,6 +54,14 @@ spec:
           # the image's entrypoint from Docker Hub, which fails for images
           # that only exist locally/in kind (never pushed to a registry).
           command: ["/usr/local/bin/backup.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           env:
             - name: POSTGRES_HOST
               value: postgres-postgresql.data-platform.svc.cluster.local

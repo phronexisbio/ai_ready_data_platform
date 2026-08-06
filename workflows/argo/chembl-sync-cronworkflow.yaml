@@ -17,14 +17,46 @@ spec:
   workflowSpec:
     serviceAccountName: argo-workflow
     entrypoint: sync
+    # Phase 16 (BUILD_PLAN_COMMERCIAL.md): stable label for NetworkPolicy
+    # targeting, matching ingest-validate-template.yaml's convention.
+    podMetadata:
+      labels:
+        network-role: connector-sync
+    volumes:
+      - name: tmp
+        emptyDir: {}
     templates:
       - name: sync
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
         container:
           image: connectors:phase7
           imagePullPolicy: IfNotPresent
           command: [python, -m, connectors.chembl_connector]
           args: ["--dataset-id", "chembl-nightly-sync"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
             - name: MINIO_ENDPOINT
               value: http://minio.data-platform.svc.cluster.local:9000
             # Phase 12 (BUILD_PLAN_COMMERCIAL.md): connectors/storage.py no

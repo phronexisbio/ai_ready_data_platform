@@ -12,11 +12,52 @@ config:
   cluster:
     enabled: false
 
+# Phase 16 (BUILD_PLAN_COMMERCIAL.md): this chart shipped with zero
+# securityContext at any level (verified: pod ran fully unrestricted, as
+# root). Uses the chart's generic merge/patch extension points rather than a
+# first-class values key, since this chart doesn't expose one directly.
+#
+# The JetStream PVC already has real data on it, written while the pod ran
+# as root — switching to a non-root user without also fixing existing
+# ownership fails hard ("storage directory is not writable"), confirmed
+# live (JetStream refused to start, container CrashLoopBackOff) before this
+# initContainer was added. `fsGroup` alone does not reliably fix permission
+# *bits* on a directory that was created 700 with no group access, only
+# group *ownership* — an explicit one-time chown is the standard fix.
+podTemplate:
+  merge:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: fix-jetstream-data-ownership
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1000:1000 /data"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: nats-js
+              mountPath: /data
+
 container:
+  merge:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
   resources:
     requests:
       memory: 128Mi
       cpu: 50m
+    limits:
+      memory: 512Mi
+      cpu: 500m
 
 # Prometheus queue-depth metrics (BUILD_PLAN.md §10 Phase 9) — converts the
 # monitoring port's JSON (config.monitor, already enabled by default) into

@@ -11,10 +11,25 @@ persistence:
   storageClass: standard
   size: 5Gi
 
+# Phase 16 (BUILD_PLAN_COMMERCIAL.md): the chart already runs as a non-root
+# user by default (securityContext.runAsUser/runAsGroup: 1000, unchanged
+# here) — capabilities/privilege-escalation weren't. readOnlyRootFilesystem
+# stays the chart's own default (false): MinIO's own image expects to write
+# operational state beyond just the data mount, and this hasn't been
+# verified safe to override.
+containerSecurityContext:
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
 resources:
   requests:
     memory: 256Mi
     cpu: 100m
+  limits:
+    memory: 1Gi
+    cpu: 500m
 
 buckets:
   - name: landing

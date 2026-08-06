@@ -9,6 +9,12 @@ controller:
     requests:
       memory: 128Mi
       cpu: 50m
+    # Phase 16 (BUILD_PLAN_COMMERCIAL.md): chart's own default securityContext
+    # is already fully hardened (non-root, read-only root fs, dropped caps) —
+    # only resource limits were missing.
+    limits:
+      memory: 512Mi
+      cpu: 500m
 
 # UI not needed yet — verification happens via kubectl. Cuts pod count/RAM.
 server:

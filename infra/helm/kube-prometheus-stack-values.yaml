@@ -68,6 +68,32 @@ prometheusOperator:
     requests:
       cpu: 100m
       memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Phase 16 (BUILD_PLAN_COMMERCIAL.md): both already ran with the chart's own
+# hardened default securityContext (non-root, read-only root fs, dropped
+# caps) — only resource limits were missing (both had requests, no limits).
+# Resources live under the subchart keys (hyphenated), not the parent
+# kubeStateMetrics/nodeExporter toggle sections, which only have `enabled`.
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 kubeControllerManager:
   enabled: false

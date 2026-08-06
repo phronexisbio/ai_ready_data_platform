@@ -16,13 +16,33 @@ spec:
         app: catalog
     spec:
       serviceAccountName: catalog
+      # Phase 16 (BUILD_PLAN_COMMERCIAL.md): pod ran with default (root)
+      # privileges and an unbounded filesystem before this — no functional
+      # reason for either, catalog is a stateless FastAPI service.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: catalog
           image: catalog:phase1
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8000
           env:
+            # Starlette's UploadFile spools large uploads to a temp file once
+            # they exceed its in-memory threshold — needs a writable /tmp
+            # even under a read-only root filesystem (see the volume below).
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
             # DATABASE_URL / MinIO creds: Phase 12 (BUILD_PLAN_COMMERCIAL.md) moved
             # these out of plaintext values into Secrets created imperatively
             # (`kubectl create secret ...`), never committed to git.
@@ -62,10 +82,30 @@ spec:
               port: 8000
             initialDelaySeconds: 3
             periodSeconds: 5
+          # Phase 16: a hung-but-not-crashed process (readinessProbe alone
+          # would just stop getting traffic, never actually restart) is now
+          # caught by this — same endpoint, more tolerant timing so a slow
+          # request doesn't trigger an unnecessary restart.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
               memory: 128Mi
               cpu: 50m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

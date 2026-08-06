@@ -19,5 +19,11 @@ primary:
     requests:
       memory: 256Mi
       cpu: 100m
+    # Phase 16 (BUILD_PLAN_COMMERCIAL.md): chart's own default securityContext
+    # is already fully hardened (non-root, read-only root fs, dropped caps) —
+    # only resource limits were missing.
+    limits:
+      memory: 1Gi
+      cpu: 500m
 
 architecture: standalone

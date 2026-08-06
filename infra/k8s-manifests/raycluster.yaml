@@ -23,10 +23,28 @@ spec:
       num-cpus: "0"
     template:
       spec:
+        # Phase 16 (BUILD_PLAN_COMMERCIAL.md): non-root + dropped capabilities
+        # only — NOT readOnlyRootFilesystem. Ray writes session/log/object-
+        # store scratch data to /tmp/ray by default, and this file's own
+        # comment above already documents why a custom command/args (which
+        # would be needed to redirect --temp-dir) can't be set without
+        # breaking KubeRay's own `ray start` invocation. Revisit once that
+        # constraint has a real answer, rather than guessing at one here.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
         containers:
           - name: ray-head
             image: engine-steps:phase2
             imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
             # No command/args: KubeRay generates the `ray start` invocation
             # itself from rayStartParams above. Specifying our own here
             # doesn't override it — it gets prepended with `&&`, and since
@@ -67,10 +85,23 @@ spec:
       rayStartParams: {}
       template:
         spec:
+          # Phase 16: same reasoning as the head group above — non-root +
+          # dropped capabilities only, not readOnlyRootFilesystem.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: ray-worker
               image: engine-steps:phase2
               imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
               # See head group's comment: no command/args, KubeRay generates it.
               env:
                 - name: PYTHONPATH

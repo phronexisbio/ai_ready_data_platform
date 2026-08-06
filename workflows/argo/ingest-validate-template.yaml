@@ -16,6 +16,20 @@ metadata:
 spec:
   entrypoint: main
   serviceAccountName: argo-workflow
+  # Phase 16 (BUILD_PLAN_COMMERCIAL.md): a stable label every pod this
+  # template creates gets, regardless of which step — lets a NetworkPolicy
+  # (or anything else) target "any engine-step pod" without depending on
+  # Argo's own auto-generated labels.
+  podMetadata:
+    labels:
+      network-role: engine-step
+  # Shared emptyDir for the /tmp any step's container might incidentally need
+  # under its now-read-only root filesystem (e.g. a library spooling scratch
+  # data) — distinct from Argo's own /var/run/argo outputs volume, which the
+  # emissary executor manages itself.
+  volumes:
+    - name: tmp
+      emptyDir: {}
   arguments:
     parameters:
       - name: file-id
@@ -59,6 +73,17 @@ spec:
             value: "{{workflow.parameters.dataset-id}}"
           - name: location
             value: "{{workflow.parameters.location}}"
+      # Phase 16: non-root, no privilege escalation, no Linux capabilities,
+      # read-only root filesystem — this step only reads from and writes to
+      # MinIO/the catalog API and Argo's own outputs volume, nothing that
+      # needs to write to its own container filesystem.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       container:
         image: engine-steps:phase2
         imagePullPolicy: IfNotPresent
@@ -72,7 +97,24 @@ spec:
           - "{{inputs.parameters.dataset-id}}"
           - --location
           - "{{inputs.parameters.location}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
         env:
+          - name: PYTHONDONTWRITEBYTECODE
+            value: "1"
           - name: MINIO_ENDPOINT
             value: http://minio.data-platform.svc.cluster.local:9000
           # Phase 12 (BUILD_PLAN_COMMERCIAL.md): connectors/storage.py no
@@ -113,6 +155,13 @@ spec:
           - name: modality
             value: "{{workflow.parameters.modality}}"
           - name: location
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       container:
         image: engine-steps:phase2
         imagePullPolicy: IfNotPresent
@@ -124,7 +173,24 @@ spec:
           - "{{inputs.parameters.modality}}"
           - --location
           - "{{inputs.parameters.location}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
         env:
+          - name: PYTHONDONTWRITEBYTECODE
+            value: "1"
           - name: MINIO_ENDPOINT
             value: http://minio.data-platform.svc.cluster.local:9000
           # Phase 12 (BUILD_PLAN_COMMERCIAL.md): connectors/storage.py no
@@ -176,6 +242,13 @@ spec:
           - name: representations
             value: "{{workflow.parameters.representations}}"
           - name: location
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       container:
         image: engine-steps:phase2
         imagePullPolicy: IfNotPresent
@@ -195,7 +268,27 @@ spec:
           - "{{inputs.parameters.location}}"
           - --representations
           - "{{inputs.parameters.representations}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        # Higher than ingest/validate: transform is where RDKit/Biopython/
+        # Pillow featurization actually runs, the one step in this DAG doing
+        # real compute, not just data movement.
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
         env:
+          - name: PYTHONDONTWRITEBYTECODE
+            value: "1"
           - name: MINIO_ENDPOINT
             value: http://minio.data-platform.svc.cluster.local:9000
           # Phase 12 (BUILD_PLAN_COMMERCIAL.md): connectors/storage.py no

@@ -1,0 +1,154 @@
+# Phase 16 (BUILD_PLAN_COMMERCIAL.md): network isolation for the data-plane
+# services a compromised low-privilege pod could otherwise reach directly
+# (the audit's finding: "a compromised connector pod has an unobstructed
+# path to Postgres/MinIO"). Scope is deliberately INGRESS-only, not a
+# namespace-wide default-deny-egress: Prometheus/Grafana/Loki's internal
+# scrape/query graph is real and moderately complex, and without a
+# policy-enforcing CNI to verify against (see below), writing an egress
+# allow-list for it would be untested guesswork risking a broken
+# observability stack the moment enforcement is ever turned on. Restricting
+# who can *ingress into* Postgres/MinIO/NATS already closes the actual gap
+# the audit found, without that risk.
+#
+# ****************************************************************
+# * KNOWN, VERIFIED ENVIRONMENT LIMITATION — READ BEFORE TRUSTING *
+# ****************************************************************
+# This cluster's CNI is kindnet (kind's default), which does NOT enforce
+# NetworkPolicy at all. Proven empirically, not assumed: a throwaway
+# default-deny-all policy was applied between two test pods and traffic
+# still flowed through unblocked. These policies are correct and ready for
+# a real environment (a managed cluster, or kindnet + Calico), but on THIS
+# cluster today they have zero actual effect — `kubectl get networkpolicy`
+# will show them as applied while providing no real isolation. Re-verify
+# with the same test (a deny-all policy + an nc connection attempt between
+# two pods) the moment this environment's CNI changes, before assuming these
+# are actually protecting anything.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: data-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-ingress
+  namespace: data-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: catalog
+        - podSelector:
+            matchLabels:
+              network-role: backup
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio-ingress
+  namespace: data-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: minio
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: catalog
+        - podSelector:
+            matchLabels:
+              network-role: engine-step
+        - podSelector:
+            matchLabels:
+              network-role: connector-sync
+        - podSelector:
+            matchLabels:
+              network-role: backup
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kuberay
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nats-ingress
+  namespace: data-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+      app.kubernetes.io/component: nats
+  policyTypes: ["Ingress"]
+  ingress:
+    # Client port: only things that actually publish/consume JetStream events.
+    - from:
+        - podSelector:
+            matchLabels:
+              network-role: connector-sync
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: nats-box
+      ports:
+        - protocol: TCP
+          port: 4222
+    # Monitor port (config.monitor, :8222): scraped by Prometheus via the
+    # chart's own PodMonitor — allowed from anywhere in-namespace rather than
+    # pinning to Prometheus's exact pod labels, since getting that selector
+    # wrong would silently break the queue-depth dashboard panel with no
+    # way to notice on this unenforced cluster.
+    - ports:
+        - protocol: TCP
+          port: 8222
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-catalog-ingress
+  namespace: data-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: catalog
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              network-role: engine-step
+        - podSelector:
+            matchLabels:
+              network-role: connector-sync
+      ports:
+        - protocol: TCP
+          port: 8000
+    # `kubectl port-forward` (how the Cloudflare Tunnel and local dev reach
+    # catalog) connects through the kubelet/API server, not from another
+    # pod's IP — which NetworkPolicy peer-matching can't cleanly express and
+    # which behaves differently across CNIs. Left open on this port
+    # specifically rather than guessing at a peer selector that might not
+    # match reality on a real enforcing cluster; tighten this once that
+    # cluster exists and the actual source can be observed.
+    - ports:
+        - protocol: TCP
+          port: 8000
