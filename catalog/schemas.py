@@ -10,6 +10,13 @@ class DatasetCreate(BaseModel):
     manifest: dict
     license: str | None = None
     schema_version: str = "1"
+    # Phase 14 (BUILD_PLAN_COMMERCIAL.md): optional because every existing
+    # internal caller (every connector, via CatalogClient) predates tenants —
+    # catalog/api.py's create_dataset defaults this to the reserved
+    # "platform" tenant when omitted, rather than requiring every connector
+    # and CronWorkflow to be touched just to pass a value that's always the
+    # same for them.
+    tenant_id: str | None = None
 
 
 class DatasetOut(BaseModel):
@@ -20,6 +27,7 @@ class DatasetOut(BaseModel):
     dataset_hash: str
     owner: str
     source: str
+    tenant_id: str
     license: str | None
     manifest: dict
     schema_version: str
@@ -52,6 +60,7 @@ class FileOut(BaseModel):
     status: str
     status_detail: str | None
     location: str
+    tenant_id: str
     created_at: datetime
 
 
@@ -92,6 +101,7 @@ class FeatureOut(BaseModel):
     quality_status: str
     quality_checks_passed: list[str]
     quality_detail: str | None
+    tenant_id: str
     created_at: datetime
 
 

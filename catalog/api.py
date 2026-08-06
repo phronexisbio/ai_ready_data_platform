@@ -81,6 +81,11 @@ def create_dataset(payload: schemas.DatasetCreate, db: Session = Depends(get_db)
         dataset_hash=dataset_hash(payload.manifest),
         owner=payload.owner,
         source=payload.source,
+        # Phase 14: every existing internal caller (every connector) predates
+        # tenants and doesn't pass one — default to the reserved "platform"
+        # tenant (shared reference data) rather than requiring every
+        # connector/CronWorkflow to be touched just for this.
+        tenant_id=payload.tenant_id or "platform",
         license=payload.license,
         manifest=payload.manifest,
         schema_version=payload.schema_version,
@@ -115,6 +120,7 @@ def create_file(payload: schemas.FileCreate, db: Session = Depends(get_db)):
     ds = _get_dataset(db, payload.dataset_id, payload.dataset_version)
     f = File(
         dataset_pk=ds.id,
+        tenant_id=ds.tenant_id,  # Phase 14: always inherited from the parent Dataset
         source=payload.source,
         checksum=payload.checksum,
         modality=payload.modality,
@@ -163,7 +169,8 @@ def create_feature(payload: schemas.FeatureCreate, db: Session = Depends(get_db)
     """Register a produced representation. Written once the transform step has
     already run the output-validation gate (§6) — quality_status/detail come
     in already decided, same append-only-log spirit as Dataset."""
-    feat = Feature(**payload.model_dump())
+    ds = _get_dataset(db, payload.dataset_id, payload.dataset_version)
+    feat = Feature(**payload.model_dump(), tenant_id=ds.tenant_id)  # Phase 14: inherited from the parent Dataset
     db.add(feat)
     db.commit()
     db.refresh(feat)

@@ -152,6 +152,20 @@ def require_scope(scope: str):
     return _check
 
 
+PLATFORM_TENANT = "platform"
+
+
+def _visible_tenants(auth: ApiKey) -> list[str]:
+    """Phase 14 (BUILD_PLAN_COMMERCIAL.md): a tenant can see its own data plus
+    the shared `platform` tenant — public-database connector syncs (ChEMBL,
+    PubChem, UniProt) and local dev/demo fixtures aren't any one customer's
+    private data, they're shared reference data every tenant should be able
+    to browse. What a tenant must never see is *another specific tenant's*
+    submitted data (their uploads/pulls) — that's the isolation this
+    function enforces everywhere it's used."""
+    return [auth.tenant_id, PLATFORM_TENANT]
+
+
 router = APIRouter(prefix="/public", dependencies=[Depends(require_api_key)])
 
 
@@ -263,15 +277,19 @@ def _feature_dict(f: Feature) -> dict:
         "quality_status": f.quality_status,
         "quality_checks_passed": f.quality_checks_passed,
         "quality_detail": f.quality_detail,
+        "tenant_id": f.tenant_id,
         "created_at": f.created_at,
     }
 
 
 @router.get("/datasets")
-def list_datasets(limit: int = Query(50, le=200), db: Session = Depends(get_db)):
-    """Latest version of each distinct dataset_id, most recent first."""
+def list_datasets(limit: int = Query(50, le=200), db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
+    """Latest version of each distinct dataset_id, most recent first — scoped
+    to this tenant's own data plus the shared platform tenant (Phase 14)."""
+    visible = _visible_tenants(auth)
     subq = (
         select(Dataset.dataset_id, func.max(Dataset.dataset_version).label("max_version"))
+        .where(Dataset.tenant_id.in_(visible))
         .group_by(Dataset.dataset_id)
         .subquery()
     )
@@ -288,6 +306,7 @@ def list_datasets(limit: int = Query(50, le=200), db: Session = Depends(get_db))
             "dataset_version": d.dataset_version,
             "owner": d.owner,
             "source": d.source,
+            "tenant_id": d.tenant_id,
             "manifest": d.manifest,
             "created_at": d.created_at,
         }
@@ -296,11 +315,16 @@ def list_datasets(limit: int = Query(50, le=200), db: Session = Depends(get_db))
 
 
 @router.get("/datasets/{dataset_id}/versions")
-def dataset_versions(dataset_id: str, db: Session = Depends(get_db)):
+def dataset_versions(dataset_id: str, db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
     rows = db.execute(
-        select(Dataset).where(Dataset.dataset_id == dataset_id).order_by(Dataset.dataset_version)
+        select(Dataset)
+        .where(Dataset.dataset_id == dataset_id, Dataset.tenant_id.in_(_visible_tenants(auth)))
+        .order_by(Dataset.dataset_version)
     ).scalars().all()
     if not rows:
+        # Same 404 whether the dataset doesn't exist or belongs to another
+        # tenant — existence itself shouldn't be leakable to a caller who
+        # can't see it.
         raise HTTPException(404, f"dataset {dataset_id} not found")
     return [
         {
@@ -309,6 +333,7 @@ def dataset_versions(dataset_id: str, db: Session = Depends(get_db)):
             "dataset_hash": d.dataset_hash,
             "owner": d.owner,
             "source": d.source,
+            "tenant_id": d.tenant_id,
             "manifest": d.manifest,
             "created_at": d.created_at,
         }
@@ -328,18 +353,19 @@ def _file_dict(f: File, dataset_id: str, dataset_version: int) -> dict:
         "checksum": f.checksum,
         "location": f.location,
         "pipeline_version": f.pipeline_version,
+        "tenant_id": f.tenant_id,
         "created_at": f.created_at,
     }
 
 
 @router.get("/datasets/{dataset_id}/files")
-def dataset_files(dataset_id: str, version: int | None = None, db: Session = Depends(get_db)):
+def dataset_files(dataset_id: str, version: int | None = None, db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
     """Per-file pipeline status (landed -> raw -> validated/rejected, then a
     Feature row once transform runs) for a dataset version. The manifest on
     GET /datasets/{id}/versions only lists filenames — this is what actually
     shows where each one currently sits in the pipeline, the same status
     field workflows/argo/ingest-validate-template.yaml's steps set."""
-    q = select(Dataset).where(Dataset.dataset_id == dataset_id)
+    q = select(Dataset).where(Dataset.dataset_id == dataset_id, Dataset.tenant_id.in_(_visible_tenants(auth)))
     if version is not None:
         q = q.where(Dataset.dataset_version == version)
     else:
@@ -352,8 +378,10 @@ def dataset_files(dataset_id: str, version: int | None = None, db: Session = Dep
 
 
 @router.get("/files/{file_id}")
-def get_file_detail(file_id: str, db: Session = Depends(get_db)):
-    f = db.execute(select(File).where(File.file_id == file_id)).scalar_one_or_none()
+def get_file_detail(file_id: str, db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
+    f = db.execute(
+        select(File).where(File.file_id == file_id, File.tenant_id.in_(_visible_tenants(auth)))
+    ).scalar_one_or_none()
     if f is None:
         raise HTTPException(404, f"file {file_id} not found")
     ds = db.execute(select(Dataset).where(Dataset.id == f.dataset_pk)).scalar_one()
@@ -361,14 +389,16 @@ def get_file_detail(file_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/files/{file_id}/raw")
-def get_file_raw(file_id: str, db: Session = Depends(get_db)):
+def get_file_raw(file_id: str, db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
     """Bounded raw-content preview of the file as it landed, decoded best-effort
     as UTF-8 (binary formats like .tiff just render as replacement characters —
     this is a text preview, not a viewer for every modality). Capped at
     RAW_PREVIEW_MAX_BYTES via an S3 Range request so this read path can't be
     used to pull an arbitrarily large connector-synced object through the
     tunnel — /upload's own size cap only bounds the public *write* path."""
-    f = db.execute(select(File).where(File.file_id == file_id)).scalar_one_or_none()
+    f = db.execute(
+        select(File).where(File.file_id == file_id, File.tenant_id.in_(_visible_tenants(auth)))
+    ).scalar_one_or_none()
     if f is None:
         raise HTTPException(404, f"file {file_id} not found")
     bucket, _, key = f.location.partition("/")
@@ -398,8 +428,9 @@ def search_features(
     quality_status: str | None = "passed",
     limit: int = Query(50, le=200),
     db: Session = Depends(get_db),
+    auth: ApiKey = Depends(require_api_key),
 ):
-    q = select(Feature)
+    q = select(Feature).where(Feature.tenant_id.in_(_visible_tenants(auth)))
     if dataset_id:
         q = q.where(Feature.dataset_id == dataset_id)
     if source_file_id:
@@ -415,16 +446,20 @@ def search_features(
 
 
 @router.get("/features/{feature_id}")
-def get_feature_detail(feature_id: str, db: Session = Depends(get_db)):
-    f = db.execute(select(Feature).where(Feature.feature_id == feature_id)).scalar_one_or_none()
+def get_feature_detail(feature_id: str, db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
+    f = db.execute(
+        select(Feature).where(Feature.feature_id == feature_id, Feature.tenant_id.in_(_visible_tenants(auth)))
+    ).scalar_one_or_none()
     if f is None:
         raise HTTPException(404, f"feature {feature_id} not found")
     return _feature_dict(f)
 
 
 @router.get("/features/{feature_id}/tensor")
-def get_feature_tensor(feature_id: str, db: Session = Depends(get_db)):
-    f = db.execute(select(Feature).where(Feature.feature_id == feature_id)).scalar_one_or_none()
+def get_feature_tensor(feature_id: str, db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
+    f = db.execute(
+        select(Feature).where(Feature.feature_id == feature_id, Feature.tenant_id.in_(_visible_tenants(auth)))
+    ).scalar_one_or_none()
     if f is None:
         raise HTTPException(404, f"feature {feature_id} not found")
     bucket, _, key = f.location.partition("/")
@@ -437,15 +472,17 @@ def get_feature_tensor(feature_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/sources")
-def source_sync_status(db: Session = Depends(get_db)):
+def source_sync_status(db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
     rows = db.execute(
         text(
             """
             SELECT DISTINCT ON (source) source, dataset_id, dataset_version, created_at
             FROM datasets
+            WHERE tenant_id = ANY(:tenants)
             ORDER BY source, created_at DESC
             """
-        )
+        ),
+        {"tenants": _visible_tenants(auth)},
     ).mappings().all()
     return [dict(r) for r in rows]
 
@@ -469,6 +506,7 @@ def _land_register_submit(*, db: Session, owner: str, source: str, dataset_id: s
         dataset_hash=dataset_hash(manifest),
         owner=owner,
         source=source,
+        tenant_id=owner,
         manifest=manifest,
     )
     db.add(ds)
@@ -485,6 +523,7 @@ def _land_register_submit(*, db: Session, owner: str, source: str, dataset_id: s
         checksum=hashlib.sha256(content).hexdigest(),
         modality=modality,
         location=location,
+        tenant_id=ds.tenant_id,
     )
     db.add(f)
     db.commit()
@@ -553,6 +592,7 @@ def _land_register_submit_batch(*, db: Session, owner: str, source: str, dataset
         dataset_hash=dataset_hash(manifest),
         owner=owner,
         source=source,
+        tenant_id=owner,
         manifest=manifest,
     )
     db.add(ds)
@@ -572,6 +612,7 @@ def _land_register_submit_batch(*, db: Session, owner: str, source: str, dataset
             checksum=hashlib.sha256(content).hexdigest(),
             modality=modality,
             location=location,
+            tenant_id=ds.tenant_id,
         )
         db.add(f)
         db.commit()
@@ -784,13 +825,15 @@ def pull_ftp(request: Request, body: dict = Body(...), db: Session = Depends(get
 
 
 @router.get("/uploads/{file_id}/status")
-def upload_status(file_id: str, db: Session = Depends(get_db)):
+def upload_status(file_id: str, db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
     """Poll target for the frontend's live upload view. `File.status`
     (landed -> raw -> validated/rejected, set by workflows/argo/ingest-validate-template.yaml's
     ingest/validate steps) already carries the pipeline stage — no need to
     also parse Argo's own workflow phase for that. Once a Feature row shows
     up for this file, transform has produced (or rejected) the final output."""
-    f = db.execute(select(File).where(File.file_id == file_id)).scalar_one_or_none()
+    f = db.execute(
+        select(File).where(File.file_id == file_id, File.tenant_id.in_(_visible_tenants(auth)))
+    ).scalar_one_or_none()
     if f is None:
         raise HTTPException(404, f"file {file_id} not found")
     features = db.execute(select(Feature).where(Feature.source_file_id == file_id)).scalars().all()
@@ -813,6 +856,15 @@ def _prometheus_query(promql: str) -> list[dict]:
         return []
 
 
+# Phase 14 (BUILD_PLAN_COMMERCIAL.md): the three stats endpoints below are
+# deliberately NOT tenant-scoped — pipeline phase counts, queue depth, and
+# cache hit rate are aggregate platform-operational metrics (from Prometheus,
+# or aggregated across all Feature rows), not individual customer records.
+# Scoping them per-tenant would mean a demo visitor's dashboard only ever
+# shows their own handful of submissions instead of real platform activity,
+# which defeats what these panels are for. rejected_files is different — it
+# returns individual File rows, so it stays scoped like everything else that
+# exposes a specific record.
 @router.get("/stats/pipeline-phases")
 def pipeline_phases():
     results = _prometheus_query("sum by (phase) (argo_workflows_total_count)")
@@ -847,9 +899,12 @@ def cache_hit_rate(hours: int = 24, db: Session = Depends(get_db)):
 
 
 @router.get("/stats/rejected-files")
-def rejected_files(limit: int = Query(20, le=100), db: Session = Depends(get_db)):
+def rejected_files(limit: int = Query(20, le=100), db: Session = Depends(get_db), auth: ApiKey = Depends(require_api_key)):
     rows = db.execute(
-        select(File).where(File.status == "rejected").order_by(File.created_at.desc()).limit(limit)
+        select(File)
+        .where(File.status == "rejected", File.tenant_id.in_(_visible_tenants(auth)))
+        .order_by(File.created_at.desc())
+        .limit(limit)
     ).scalars().all()
     return [
         {

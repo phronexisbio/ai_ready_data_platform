@@ -43,6 +43,13 @@ class Dataset(Base):
     dataset_hash: Mapped[str] = mapped_column(String, nullable=False)
     owner: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
+    # Phase 14 (BUILD_PLAN_COMMERCIAL.md): the enforced tenant-isolation key —
+    # every /public/* query filters on this. Distinct from `owner`: `owner` is
+    # a free-text "who/what created this" label with looser history (connector
+    # names, literal source strings from before Phase 13); `tenant_id` is
+    # always either a real api_keys.tenant_id or the reserved "platform"
+    # tenant for shared reference data (public DB syncs, local dev fixtures).
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     license: Mapped[str | None] = mapped_column(String, nullable=True)
     manifest: Mapped[dict] = mapped_column(JSON, nullable=False)
     schema_version: Mapped[str] = mapped_column(String, nullable=False, default="1")
@@ -60,6 +67,10 @@ class File(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     file_id: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True, default=_uuid)
     dataset_pk: Mapped[str] = mapped_column(ForeignKey("datasets.id"), nullable=False)
+    # Phase 14: always copied from the parent Dataset.tenant_id at creation —
+    # duplicated here (not just reachable via dataset_pk) so a tenant-scoped
+    # query on File never needs a join to enforce isolation.
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     source: Mapped[str] = mapped_column(String, nullable=False)
     checksum: Mapped[str] = mapped_column(String, nullable=False)
     modality: Mapped[str] = mapped_column(String, nullable=False)
@@ -105,6 +116,9 @@ class Feature(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     feature_id: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True, default=_uuid)
     source_file_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Phase 14: always copied from the parent Dataset.tenant_id at creation —
+    # same reasoning as File.tenant_id above.
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     dataset_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     dataset_version: Mapped[int] = mapped_column(nullable=False)
     modality: Mapped[str] = mapped_column(String, nullable=False)
