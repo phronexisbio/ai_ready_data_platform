@@ -1,5 +1,7 @@
 # Build Plan — AI-Ready Bulk Data Platform (v2, Industrial-Grade)
 
+**v2 is complete** — every phase below was built and its "done when" verified (see `CLAUDE.md`'s phase-by-phase notes). v2 was explicitly scoped for a single internal operator (see §2/§8's deferral of Keycloak, multi-tenancy, IAM). Now that this platform is being used commercially by a company for its (potentially multiple) customers, that trigger has fired — **[`BUILD_PLAN_COMMERCIAL.md`](BUILD_PLAN_COMMERCIAL.md)** is the v3 plan that closes the resulting gaps (auth, tenancy, secrets, HA, compliance) phase by phase, without changing the architecture below.
+
 **Scope of v2**: same end goal as v1 — raw multi-modal drug-discovery data in, validated/canonicalized/featurized model-ready tensors out, sitting in a feature store with a stable output contract. What changes is *how it's built*: as a platform of decoupled services (connectors, event bus, metadata catalog, dataset registry, processing engine, feature repository) instead of a single linear pipeline, so it can absorb new data sources, new modalities, and new scale without rearchitecting.
 
 **Still explicitly out of scope**: model training, fine-tuning loops, inference serving. v2 stops at "data is sitting in the feature repository, versioned and queryable, ready to be pulled." That boundary hasn't moved.
