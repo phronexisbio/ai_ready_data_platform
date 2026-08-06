@@ -21,7 +21,7 @@ Every representation a transform pipeline produces is one of exactly **four cont
 
 | Type | Shape | Example models |
 |---|---|---|
-| Token-ID sequence | `[seq_len]` + attention mask | ESM-2/3, TxGemma, REINVENT, ProtBERT-style |
+| Token-ID sequence | `[seq_len]` + attention mask | ESM-2/3, TxGemma, REINVENT, ProtBERT-style, TabTransformer/FT-Transformer-style (tabular) |
 | Graph batch | node features, edge index, edge features | Chemprop, ProteinMPNN, GNN-based ADMET |
 | Dense image tensor | `[C, H, W]` float32 | Phenom-style phenomics models |
 | SE(3) frame tensor | rotation + translation per residue/atom | RFdiffusion, AlphaFold/Boltz-class |

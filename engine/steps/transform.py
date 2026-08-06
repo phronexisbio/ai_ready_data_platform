@@ -1,7 +1,8 @@
 """Argo `transform` step — BUILD_PLAN.md §10 Phase 3/4/5/6.
 
 Dispatches a validated file to its modality's pipeline (molecule, sequence,
-structure, image — tabular and text still have no transform pipeline).
+structure, image, tabular — text is still the only modality with no
+transform pipeline).
 
 Before generating each requested representation, checks the content-addressed
 cache (BUILD_PLAN §10 Phase 5) via engine/feature_repository — keyed on
@@ -32,17 +33,19 @@ import json
 from connectors.catalog_client import CatalogClient
 from connectors.storage import get, land, parse_location
 from engine.feature_repository import FeatureRepository
-from engine.pipelines import image_pipeline, molecule_pipeline, sequence_pipeline, structure_pipeline
+from engine.pipelines import image_pipeline, molecule_pipeline, sequence_pipeline, structure_pipeline, tabular_pipeline
 from engine.validators.output import image as image_output
 from engine.validators.output import molecule as molecule_output
 from engine.validators.output import sequence as sequence_output
 from engine.validators.output import structure as structure_output
+from engine.validators.output import tabular as tabular_output
 
 _PIPELINES = {
     "molecule": molecule_pipeline,
     "sequence": sequence_pipeline,
     "structure": structure_pipeline,
     "image": image_pipeline,
+    "tabular": tabular_pipeline,
 }
 
 _MODEL_TAGS = {
@@ -52,6 +55,7 @@ _MODEL_TAGS = {
     "structure_graph": ["proteinmpnn"],
     "structure_frames": ["rfdiffusion", "boltz", "alphafold-class"],
     "image_tensor": ["phenom", "cell-painting-cnn"],
+    "tabular_tokens": ["tabtransformer", "ft-transformer"],
 }
 
 
@@ -68,6 +72,8 @@ def _validate_output(representation_type: str, canonical_form: str, tensor: dict
         return structure_output.validate_frames(tensor)
     if representation_type == "image_tensor":
         return image_output.validate_image_tensor(tensor)
+    if representation_type == "tabular_tokens":
+        return tabular_output.validate_tokens(tensor)
     raise ValueError(f"no output validator registered for representation '{representation_type}'")
 
 

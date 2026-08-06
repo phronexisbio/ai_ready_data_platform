@@ -9,6 +9,7 @@ from engine.validators.output import image as image_output
 from engine.validators.output import molecule as molecule_output
 from engine.validators.output import sequence as sequence_output
 from engine.validators.output import structure as structure_output
+from engine.validators.output import tabular as tabular_output
 
 ASPIRIN_CANONICAL = Chem.MolToSmiles(Chem.MolFromSmiles("CC(=O)OC1=CC=CC=C1C(=O)O"))
 
@@ -113,3 +114,26 @@ def test_image_tensor_shape_mismatch_corruption():
     truncated = {"shape": [1, 4, 4], "data": [[[0.5, 0.5], [0.5, 0.5]]]}  # says 4x4, only has 2x2
     ok, reason = image_output.validate_image_tensor(truncated)
     assert not ok and "corrupted/truncated" in reason
+
+
+def test_tabular_tokens_good_and_column_count_mismatch_corruption():
+    from engine.pipelines.tabular_pipeline.canonical import TabularRecord
+    from engine.pipelines.tabular_pipeline.featurize import to_tokens
+
+    record = TabularRecord(name="row_1", columns=["a", "b"], values=["1", "2"])
+    tokens = to_tokens(record)
+    ok, _ = tabular_output.validate_tokens(tokens)
+    assert ok
+
+    corrupted = dict(tokens)
+    corrupted["num_columns"] = 999  # claims a column count the tokens don't match
+    ok, reason = tabular_output.validate_tokens(corrupted)
+    assert not ok and "does not match column count" in reason
+
+
+def test_tabular_tokens_out_of_vocab_corruption():
+    from engine.pipelines.tabular_pipeline.featurize import VOCAB_SIZE
+
+    bad = {"token_ids": [0, VOCAB_SIZE + 100], "attention_mask": [1, 1], "num_columns": 0}
+    ok, reason = tabular_output.validate_tokens(bad)
+    assert not ok and "out of vocab range" in reason
