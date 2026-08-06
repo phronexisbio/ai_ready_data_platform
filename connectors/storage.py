@@ -6,9 +6,19 @@ import os
 import boto3
 from botocore.client import Config
 
+def _required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(
+            f"{name} is not set — Phase 12 (BUILD_PLAN_COMMERCIAL.md) removed the "
+            f"plaintext-credential fallback default; wire it from the minio-credentials Secret."
+        )
+    return value
+
+
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio.data-platform.svc.cluster.local:9000")
-MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
+MINIO_ACCESS_KEY = _required_env("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = _required_env("MINIO_SECRET_KEY")
 
 
 def client():

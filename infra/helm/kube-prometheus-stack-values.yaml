@@ -8,7 +8,15 @@ alertmanager:
   enabled: false
 
 grafana:
-  adminPassword: admin
+  # Phase 12 (BUILD_PLAN_COMMERCIAL.md): admin password lives in the
+  # `grafana-admin-credentials` Secret (keys `admin-user`/`admin-password`),
+  # created imperatively via `kubectl create secret ...`, never committed to
+  # git. No Grafana persistence is configured, so every pod restart re-seeds
+  # the admin user fresh from whatever this Secret currently holds.
+  admin:
+    existingSecret: grafana-admin-credentials
+    userKey: admin-user
+    passwordKey: admin-password
   service:
     type: ClusterIP
   resources:

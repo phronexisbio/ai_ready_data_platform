@@ -1,8 +1,14 @@
 auth:
   username: catalog
-  password: catalog
   database: catalog
-  postgresPassword: postgres
+  # Phase 12 (BUILD_PLAN_COMMERCIAL.md): passwords live in the
+  # `postgres-credentials` Secret (keys `password`/`postgres-password`),
+  # created imperatively via `kubectl create secret ...`, never committed to
+  # git. existingSecret makes the chart ignore any password value here.
+  existingSecret: postgres-credentials
+  secretKeys:
+    adminPasswordKey: postgres-password
+    userPasswordKey: password
 
 primary:
   persistence:

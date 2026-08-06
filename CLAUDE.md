@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Phase 0 (cluster foundation), Phase 1 (metadata catalog + connector framework), Phase 2 (ingest + validate), Phase 3 (molecule + sequence transform pipelines, plus tabular_pipeline added later — see below), Phase 4 (structure + image transform pipelines), Phase 5 (content-addressed caching), Phase 6 (feature repository), Phase 7 (additional connectors), Phase 8 (KubeRay GPU integration — CPU-only in this environment, see below), Phase 9 (observability), Phase 10 (backups), and an initial pass at Phase 11 (tests + README) are done. Phase 11 is explicitly ongoing (BUILD_PLAN's own framing, not a one-time milestone) — the test suite should keep growing as code changes, not be treated as finished. When implementation continues on v2's scope, follow the repository structure and phase order defined in `docs/BUILD_PLAN.md` (§9 and §10) rather than improvising a different layout.
 
-**This platform is now being used commercially by a company (contractual work), not just as a single-operator demo.** v2 was explicitly scoped for a single internal operator (no auth, no multi-tenancy, secrets as plain Helm values) — that scoping is now a set of real gaps, not a deferred nice-to-have. An evidence-based audit found 23 concrete gaps (no auth distinguishing customers, no tenant isolation in the schema, plaintext credentials committed to git, no HA/DR, no alerting, connector-sourced data licenses never populated, and more). **`docs/BUILD_PLAN_COMMERCIAL.md`** (Phases 12–22) is the not-yet-started remediation plan — follow its phase order (12 → 13 → 14 → 16 → 17 → 18 → 19 → 15 → 20 → 21 → 22) for any commercial-hardening work, the same way v2's phases were followed in order, rather than picking gaps to fix ad hoc.
+**This platform is now being used commercially by a company (contractual work), not just as a single-operator demo.** v2 was explicitly scoped for a single internal operator (no auth, no multi-tenancy, secrets as plain Helm values) — that scoping is now a set of real gaps, not a deferred nice-to-have. An evidence-based audit found 23 concrete gaps (no auth distinguishing customers, no tenant isolation in the schema, plaintext credentials committed to git, no HA/DR, no alerting, connector-sourced data licenses never populated, and more). **`docs/BUILD_PLAN_COMMERCIAL.md`** (Phases 12–22) is the remediation plan — Phase 12 (secrets remediation) is done; Phases 13–22 are not yet started. Follow the plan's suggested order (13 → 14 → 16 → 17 → 18 → 19 → 15 → 20 → 21 → 22) for further commercial-hardening work, the same way v2's phases were followed in order, rather than picking gaps to fix ad hoc.
 
 **Run `python -m pytest` (unit tests) before considering any change to `engine/` or `connectors/` done.** They're fast (<1s, no cluster/network needed) and already caught one real bug (a truthy-`Element` bug in `uniprot_xml.py` — see Phase 11 below) — there's no excuse not to run them.
 
@@ -24,8 +24,12 @@ kind delete cluster --name ai-ready-data-platform
 # everything (MinIO, NATS, and all future platform services) lives in the data-platform namespace
 kubectl -n data-platform get pods,svc
 
-# MinIO: rootUser/rootPassword are both `minioadmin` (infra/helm/minio-values.yaml), data lake zone
-# buckets from BUILD_PLAN §5 are pre-created via the chart's `buckets:` list.
+# MinIO: root credentials live in the `minio-credentials` Secret (Phase 12,
+# BUILD_PLAN_COMMERCIAL.md — no plaintext value in infra/helm/minio-values.yaml
+# anymore). Retrieve for local `mc`/SDK use with:
+#   kubectl -n data-platform get secret minio-credentials -o jsonpath='{.data.rootUser}' | base64 -d; echo
+#   kubectl -n data-platform get secret minio-credentials -o jsonpath='{.data.rootPassword}' | base64 -d; echo
+# data lake zone buckets from BUILD_PLAN §5 are pre-created via the chart's `buckets:` list.
 kubectl -n data-platform port-forward svc/minio 9000:9000     # then use `mc`/S3 SDK against localhost:9000
 kubectl -n data-platform port-forward svc/minio-console 9001:9001
 
@@ -47,8 +51,11 @@ Note: the NATS values file sets up JetStream file storage but does not yet confi
 Python environment: a single venv at `.venv/` (repo root) covers both `catalog/` and `connectors/` during local dev — `python3 -m venv .venv && source .venv/bin/activate && pip install -r catalog/requirements.txt -r connectors/requirements.txt`. Each of `catalog/` and `connectors/` keeps its own `requirements.txt` because they ship as separate Docker images/CronJobs eventually, even though local dev shares one venv.
 
 ```bash
-# Postgres (bitnami chart): db "catalog", user "catalog"/"catalog", superuser "postgres"/"postgres"
-# (infra/helm/postgres-values.yaml)
+# Postgres (bitnami chart): db "catalog", user "catalog". Passwords live in the
+# `postgres-credentials` Secret (Phase 12, BUILD_PLAN_COMMERCIAL.md — no
+# plaintext value in infra/helm/postgres-values.yaml anymore). Retrieve with:
+#   kubectl -n data-platform get secret postgres-credentials -o jsonpath='{.data.password}' | base64 -d; echo           # catalog user
+#   kubectl -n data-platform get secret postgres-credentials -o jsonpath='{.data.postgres-password}' | base64 -d; echo  # superuser
 
 # catalog service: rebuild + redeploy after editing catalog/*.py
 docker build -f catalog/Dockerfile -t catalog:phase1 .
@@ -66,6 +73,10 @@ bash infra/setup-nats-streams.sh   # run once per cluster, via nats-box — see 
 kubectl -n data-platform port-forward svc/minio 19000:9000 &
 kubectl -n data-platform port-forward svc/nats 14222:4222 &
 kubectl -n data-platform port-forward svc/catalog 18000:8000 &
+# MINIO_ACCESS_KEY/MINIO_SECRET_KEY are required as of Phase 12 (no more
+# plaintext fallback default) — pull them from the Secret, don't hardcode:
+MINIO_ACCESS_KEY=$(kubectl -n data-platform get secret minio-credentials -o jsonpath='{.data.rootUser}' | base64 -d) \
+MINIO_SECRET_KEY=$(kubectl -n data-platform get secret minio-credentials -o jsonpath='{.data.rootPassword}' | base64 -d) \
 MINIO_ENDPOINT=http://127.0.0.1:19000 NATS_URL=nats://127.0.0.1:14222 CATALOG_URL=http://127.0.0.1:18000 \
   python3 -c "from connectors.local_connector import LocalConnector; LocalConnector(batch_dir='tests/sample_data/local_batch').run(dataset_id='my-batch', owner='me')"
 ```
@@ -191,8 +202,11 @@ HEAD_POD=$(kubectl -n data-platform get pods -l ray.io/cluster=raycluster,ray.io
 kubectl -n data-platform exec "$HEAD_POD" -- ray status               # per-node resource breakdown
 
 # run a batch (files must already be status=validated for the given dataset_id/version)
+# MINIO_ACCESS_KEY/MINIO_SECRET_KEY required as of Phase 12 (no plaintext fallback default):
 kubectl -n data-platform exec "$HEAD_POD" -- env \
   MINIO_ENDPOINT=http://minio.data-platform.svc.cluster.local:9000 \
+  MINIO_ACCESS_KEY=$(kubectl -n data-platform get secret minio-credentials -o jsonpath='{.data.rootUser}' | base64 -d) \
+  MINIO_SECRET_KEY=$(kubectl -n data-platform get secret minio-credentials -o jsonpath='{.data.rootPassword}' | base64 -d) \
   CATALOG_URL=http://catalog.data-platform.svc.cluster.local:8000 \
   python -m engine.steps.ray_batch_transform --dataset-id <id> --dataset-version <n>
 ```
@@ -204,12 +218,14 @@ Only `image_pipeline` is wired into the batch driver — it's the one of Phase 8
 **Hybrid signal sourcing, deliberately** — not everything goes through Prometheus. Argo's workflow-controller and NATS's JetStream already expose real Prometheus metrics natively (no custom instrumentation needed for "pipeline success/failure" or "queue depth"), but "cache hit rate" and "per-source sync status" are fundamentally catalog questions — `Feature.quality_checks_passed` and `Dataset.source`/`created_at` already hold the answer in Postgres. Rather than build custom Prometheus counters/a Pushgateway just to duplicate what the catalog already records for ephemeral batch/Argo-step pods (which don't fit Prometheus's pull-scrape model well anyway), Grafana queries the catalog's Postgres database directly via SQL panels. Use the right tool per signal, not one tool for everything.
 
 ```bash
-kubectl -n data-platform port-forward svc/kube-prometheus-stack-grafana 3000:80    # admin/admin
+kubectl -n data-platform port-forward svc/kube-prometheus-stack-grafana 3000:80
+# admin password lives in the `grafana-admin-credentials` Secret (Phase 12, BUILD_PLAN_COMMERCIAL.md):
+kubectl -n data-platform get secret grafana-admin-credentials -o jsonpath='{.data.admin-password}' | base64 -d; echo
 kubectl -n data-platform port-forward svc/kube-prometheus-stack-prometheus 9090:9090
 kubectl -n data-platform get cronworkflows,podmonitor,raycluster                    # sanity-check what's being scraped
 ```
 
-`observability/dashboards/platform-overview.json` is the source of truth for the one dashboard built so far (5 panels: Argo workflow phases, recently rejected files, feature cache hit rate, NATS queue depth for the `ingestion-service` consumer, per-source sync status). It's provisioned into Grafana via `infra/k8s-manifests/grafana-dashboard-platform-overview.yaml`, a *generated* ConfigMap wrapper — after editing the JSON, regenerate the YAML rather than hand-editing it (the exact command is in that file's header comment), then `kubectl apply` it. Same pattern for datasources: `infra/k8s-manifests/grafana-postgres-datasource.yaml` is a hand-written ConfigMap labeled `grafana_datasource: "1"`, picked up by Grafana's sidecar the same way dashboards are (`grafana_dashboard: "1"`). There's no equivalent file for Loki — `loki-stack`'s chart already auto-creates one (see gotcha #1 below); adding a second would just duplicate it.
+`observability/dashboards/platform-overview.json` is the source of truth for the one dashboard built so far (5 panels: Argo workflow phases, recently rejected files, feature cache hit rate, NATS queue depth for the `ingestion-service` consumer, per-source sync status). It's provisioned into Grafana via `infra/k8s-manifests/grafana-dashboard-platform-overview.yaml`, a *generated* ConfigMap wrapper — after editing the JSON, regenerate the YAML rather than hand-editing it (the exact command is in that file's header comment), then `kubectl apply` it. Same discovery pattern for datasources (label `grafana_datasource: "1"`, picked up the same way dashboards are via `grafana_dashboard: "1"`) — but as of Phase 12 (BUILD_PLAN_COMMERCIAL.md), `infra/k8s-manifests/grafana-postgres-datasource.template.yaml` is a **template**, not applied directly: Grafana's own datasource-provisioning format has no notion of a K8s secretKeyRef, so the Postgres password has to be inline in the YAML Grafana reads — the template gets rendered with the live password via `envsubst` and applied as a `Secret` (never a `ConfigMap`, never committed with a real value; the exact render+apply command is in the template's header comment). There's no equivalent file for Loki — `loki-stack`'s chart already auto-creates one (see gotcha #1 below); adding a second would just duplicate it.
 
 **Three non-obvious issues hit during setup, worth knowing before re-touching this stack:**
 1. `loki-stack`'s own chart auto-creates a Loki datasource ConfigMap (`loki-loki-stack`) with `isDefault: true`, which conflicts with kube-prometheus-stack's Prometheus datasource (also default) — Grafana's provisioning silently fails cluster-wide with "Only one datasource per organization can be marked as default" until one is fixed. Patched the chart-managed ConfigMap directly to `isDefault: false` (a manual, one-time fix — a future `helm upgrade loki` could revert it; there's no values.yaml knob for this in the chart).
@@ -240,6 +256,18 @@ python -m pytest -m integration  # needs the live cluster — port-forward comma
 **Writing the unit tests immediately found a real, previously-unnoticed bug**: `engine/pipelines/sequence_pipeline/adapters/uniprot_xml.py` used `entry.find("up:accession", NS) or entry.find("accession")` to fall back when a namespace prefix doesn't match — but `xml.etree.ElementTree.Element.__bool__` is `len(elem) > 0` (child-element count), not "was this found." A leaf element like `<accession>P12345</accession>` has no children, so it's falsy even on a *successful* find, and the `or` silently fell through to the (also-failing) fallback, returning `"unknown"` instead of the real accession. Fixed with explicit `is None` checks (see `_find_with_fallback`). This adapter was never exercised by the real UniProt connector (which fetches FASTA, not XML) so nothing in production was ever wrong — but it's exactly the kind of bug that would have shipped silently wrong the day something *did* call it. Take this as the argument for why "ongoing" in this phase's name is load-bearing: more tests will keep finding more of these.
 
 `README.md` (repo root) is the human-facing counterpart to this file — the output contract and catalog schema in prose, meant for someone picking up the project or building a v3 model connector, without needing every phase's operational gotchas. Keep the two in sync but distinct: README explains *what* and *why* the contract is; this file explains *how* to operate and debug the thing that implements it.
+
+## Secrets remediation (Phase 12 — BUILD_PLAN_COMMERCIAL.md)
+
+MinIO root credentials, both Postgres passwords (`catalog` user + `postgres` superuser), and the Grafana admin password were all committed in plaintext in `infra/helm/*.yaml` (and, for Postgres, duplicated again in `infra/k8s-manifests/catalog.yaml`'s `DATABASE_URL` and hand-baked into `catalog/db.py`'s fallback default). All four are now real, randomly generated values living only in Kubernetes Secrets (`minio-credentials`, `postgres-credentials`, `grafana-admin-credentials`), created imperatively — never committed — the same pattern `PUBLIC_API_KEY` already used correctly. Rotated live against the running cluster (MinIO/Grafana pick up new env on restart; Postgres needed an explicit `ALTER USER ... WITH PASSWORD ...` since the chart only sets a password at first `initdb`) and verified end-to-end afterward: a real file pushed through the actual ingest→validate→transform DAG, a real Grafana datasource health check, a real Argo-submitted connector sync — not just "the pods came back up."
+
+**The plaintext-credential fallback defaults are gone on purpose** — `connectors/storage.py`, `catalog/public_api.py`, and `catalog/db.py` now raise immediately if `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`/`DATABASE_URL` aren't set, rather than silently defaulting to a known value. Every Argo workflow template/CronWorkflow that reads MinIO credentials now wires them from `minio-credentials` via `secretKeyRef` — including `ingest-validate-template.yaml`'s three steps and the `chembl`/`pubchem` CronWorkflows, which previously had *no* MinIO credential env at all and only worked because of the fallback default. If you add a new Argo template or CronWorkflow that touches MinIO, it needs this wiring explicitly — there's no safety net anymore. `tests/conftest.py` sets dummy `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY` values for the unit test suite (which never touches real MinIO — HTTP/S3 calls are mocked), so `python -m pytest` doesn't need real credentials.
+
+**One credential couldn't be wired via `secretKeyRef` at all**: Grafana's own datasource-provisioning file format has no notion of a Kubernetes secret reference — the Postgres password has to be inline in the YAML Grafana reads. `infra/k8s-manifests/grafana-postgres-datasource.template.yaml` is therefore a template (`${POSTGRES_CATALOG_PASSWORD}` placeholder), rendered with `envsubst` and applied as a `Secret` (not a `ConfigMap` — the datasource sidecar watches both, per its `RESOURCE: "both"` setting) rather than ever committing the real value; the exact render+apply command is in the file's own header comment.
+
+**`gitleaks detect --source . --log-opts="--all"` was run against the full commit history and found nothing** — worth knowing what that does and doesn't prove: it confirms no *high-entropy* secret (a real API key, token, or certificate) was ever accidentally committed. It does **not** catch low-entropy, human-guessable default passwords like `minioadmin`/`catalog`/`admin` — those don't match gitleaks' default detection rules at all, which is exactly why this phase needed a manual, targeted grep across every values/manifest file rather than trusting a scanner alone. `.pre-commit-config.yaml` adds gitleaks as an install-time hook (`pip install pre-commit && pre-commit install`) going forward, with the same caveat: it's a real, useful guard against a genuinely random secret landing in a diff, not a substitute for reviewing what a new low-entropy default value might be before committing it.
+
+**LICENSE**: still an open decision, deliberately not resolved this phase — the company hasn't specified proprietary vs. another arrangement yet. Don't assume a default (MIT, Apache, etc.) without asking; it's a legal call, not an engineering one.
 
 ## What this project is
 

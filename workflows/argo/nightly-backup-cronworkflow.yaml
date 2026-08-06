@@ -40,16 +40,28 @@ spec:
               value: postgres-postgresql.data-platform.svc.cluster.local
             - name: POSTGRES_USER
               value: catalog
+            # Phase 12 (BUILD_PLAN_COMMERCIAL.md): credentials come from Secrets
+            # created imperatively via `kubectl create secret ...`, never
+            # committed to git.
             - name: POSTGRES_PASSWORD
-              value: catalog
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
             - name: POSTGRES_DB
               value: catalog
             - name: MINIO_ENDPOINT
               value: http://minio.data-platform.svc.cluster.local:9000
             - name: MINIO_ACCESS_KEY
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: rootUser
             - name: MINIO_SECRET_KEY
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: rootPassword
           resources:
             requests:
               cpu: 100m

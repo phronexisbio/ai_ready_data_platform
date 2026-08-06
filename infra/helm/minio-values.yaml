@@ -1,7 +1,10 @@
 mode: standalone
 
-rootUser: minioadmin
-rootPassword: minioadmin
+# Phase 12 (BUILD_PLAN_COMMERCIAL.md): root credentials live in the
+# `minio-credentials` Secret (keys `rootUser`/`rootPassword`), created
+# imperatively via `kubectl create secret ...`, never committed to git.
+# rootUser/rootPassword above are ignored once existingSecret is set.
+existingSecret: minio-credentials
 
 persistence:
   enabled: true

@@ -75,6 +75,20 @@ spec:
         env:
           - name: MINIO_ENDPOINT
             value: http://minio.data-platform.svc.cluster.local:9000
+          # Phase 12 (BUILD_PLAN_COMMERCIAL.md): connectors/storage.py no
+          # longer has a plaintext-credential fallback default — these must
+          # be supplied explicitly, from a Secret created imperatively via
+          # `kubectl create secret ...`, never committed to git.
+          - name: MINIO_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: rootUser
+          - name: MINIO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: rootPassword
           - name: CATALOG_URL
             value: http://catalog.data-platform.svc.cluster.local:8000
       outputs:
@@ -105,6 +119,20 @@ spec:
         env:
           - name: MINIO_ENDPOINT
             value: http://minio.data-platform.svc.cluster.local:9000
+          # Phase 12 (BUILD_PLAN_COMMERCIAL.md): connectors/storage.py no
+          # longer has a plaintext-credential fallback default — these must
+          # be supplied explicitly, from a Secret created imperatively via
+          # `kubectl create secret ...`, never committed to git.
+          - name: MINIO_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: rootUser
+          - name: MINIO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: rootPassword
           - name: CATALOG_URL
             value: http://catalog.data-platform.svc.cluster.local:8000
       outputs:
@@ -154,5 +182,19 @@ spec:
         env:
           - name: MINIO_ENDPOINT
             value: http://minio.data-platform.svc.cluster.local:9000
+          # Phase 12 (BUILD_PLAN_COMMERCIAL.md): connectors/storage.py no
+          # longer has a plaintext-credential fallback default — these must
+          # be supplied explicitly, from a Secret created imperatively via
+          # `kubectl create secret ...`, never committed to git.
+          - name: MINIO_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: rootUser
+          - name: MINIO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: rootPassword
           - name: CATALOG_URL
             value: http://catalog.data-platform.svc.cluster.local:8000

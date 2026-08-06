@@ -23,16 +23,29 @@ spec:
           ports:
             - containerPort: 8000
           env:
+            # DATABASE_URL / MinIO creds: Phase 12 (BUILD_PLAN_COMMERCIAL.md) moved
+            # these out of plaintext values into Secrets created imperatively
+            # (`kubectl create secret ...`), never committed to git — same
+            # pattern as PUBLIC_API_KEY below, now applied everywhere.
             - name: DATABASE_URL
-              value: postgresql+psycopg2://catalog:catalog@postgres-postgresql.data-platform.svc.cluster.local:5432/catalog
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: database-url
             - name: PROMETHEUS_URL
               value: http://kube-prometheus-stack-prometheus.data-platform.svc.cluster.local:9090
             - name: MINIO_ENDPOINT
               value: http://minio.data-platform.svc.cluster.local:9000
             - name: MINIO_ACCESS_KEY
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: rootUser
             - name: MINIO_SECRET_KEY
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: rootPassword
             # Protects catalog/public_api.py's /public/* endpoints — the only
             # surface exposed through the Cloudflare Tunnel. Value lives in a
             # Secret created imperatively (`kubectl create secret ...`), never

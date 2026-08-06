@@ -1,0 +1,46 @@
+# Grafana datasource pointing directly at the catalog's Postgres database
+# (BUILD_PLAN.md §10 Phase 9) — cache hit rate and per-source sync status are
+# naturally SQL queries over Dataset/Feature rows, not things worth building
+# custom Prometheus instrumentation for when Grafana can query Postgres
+# directly. Picked up automatically by kube-prometheus-stack's Grafana sidecar
+# (grafana.sidecar.datasources, label grafana_datasource: "1", RESOURCE: "both"
+# so it watches Secrets as well as ConfigMaps).
+#
+# Phase 12 (BUILD_PLAN_COMMERCIAL.md): Grafana's own datasource-provisioning
+# file format has no notion of a Kubernetes secretKeyRef — the password has to
+# be inline in the YAML Grafana reads. So this is a *template*, not applied
+# directly: render it with the live password from postgres-credentials and
+# apply as a Secret (never a ConfigMap, and never committed with a real
+# value):
+#
+#   envsubst < infra/k8s-manifests/grafana-postgres-datasource.template.yaml \
+#     POSTGRES_CATALOG_PASSWORD="$(kubectl -n data-platform get secret postgres-credentials -o jsonpath='{.data.password}' | base64 -d)" \
+#     | kubectl apply -f -
+#
+# (envsubst reads the variable from its own environment, not a CLI arg — set
+# it inline: `POSTGRES_CATALOG_PASSWORD=... envsubst < ... | kubectl apply -f -`)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-postgres-datasource
+  namespace: data-platform
+  labels:
+    grafana_datasource: "1"
+stringData:
+  catalog-postgres.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Catalog (Postgres)
+        type: postgres
+        access: proxy
+        url: postgres-postgresql.data-platform.svc.cluster.local:5432
+        database: catalog
+        user: catalog
+        secureJsonData:
+          password: ${POSTGRES_CATALOG_PASSWORD}
+        jsonData:
+          sslmode: disable
+          postgresVersion: 1800
+          timescaledb: false
+        isDefault: false
+        editable: true

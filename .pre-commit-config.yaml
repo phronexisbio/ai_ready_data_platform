@@ -1,0 +1,9 @@
+# Phase 12 (BUILD_PLAN_COMMERCIAL.md): secret-scanning guard against the
+# plaintext-credential-in-git regression this phase just fixed. Install once
+# per clone with `pip install pre-commit && pre-commit install`; Phase 19
+# will also run this in CI so it isn't only opt-in.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
