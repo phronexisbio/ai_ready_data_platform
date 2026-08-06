@@ -4,10 +4,12 @@ The source of truth every other platform component (connectors, engine,
 feature repository) queries instead of inspecting files directly.
 """
 
+import hmac
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,24 @@ from catalog.db import engine, get_db
 from catalog.hashing import dataset_hash
 from catalog.models import Base, Dataset, Feature, File, Job, Pipeline
 from catalog.public_api import router as public_router
+
+# Phase 13 (BUILD_PLAN_COMMERCIAL.md): these internal endpoints previously had
+# no authentication at all — anything on the cluster network could read/write
+# every table. This isn't full per-service identity, just a shared secret
+# every internal caller (connectors, engine steps, via CatalogClient) now
+# presents — closes "any pod, no exceptions" down to "any pod holding the
+# secret," which is a real reduction in blast radius on its own.
+INTERNAL_API_SECRET = os.environ.get("INTERNAL_API_SECRET")
+
+
+def require_internal_secret(x_internal_secret: str | None = Header(default=None)):
+    if not INTERNAL_API_SECRET:
+        raise HTTPException(500, "INTERNAL_API_SECRET not configured on the server")
+    if not x_internal_secret or not hmac.compare_digest(x_internal_secret, INTERNAL_API_SECRET):
+        raise HTTPException(401, "invalid or missing internal secret")
+
+
+internal_router = APIRouter(dependencies=[Depends(require_internal_secret)])
 
 
 @asynccontextmanager
@@ -26,6 +46,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI-Ready Data Platform — Metadata Catalog", lifespan=lifespan)
 app.include_router(public_router)
+# internal_router is included at the bottom of this file, not here — its
+# routes are only added to it by the @internal_router... decorators further
+# down, and FastAPI's include_router() copies whatever routes exist on the
+# router at call time, not a live reference. Including it this early would
+# silently register zero of the internal endpoints.
 
 
 @app.get("/health")
@@ -42,7 +67,7 @@ def _get_dataset(db: Session, dataset_id: str, dataset_version: int) -> Dataset:
     return ds
 
 
-@app.post("/datasets", response_model=schemas.DatasetOut, status_code=201)
+@internal_router.post("/datasets", response_model=schemas.DatasetOut, status_code=201)
 def create_dataset(payload: schemas.DatasetCreate, db: Session = Depends(get_db)):
     """Register a new dataset manifest. Always a new version — manifests are
     immutable, so this never updates an existing row."""
@@ -66,7 +91,7 @@ def create_dataset(payload: schemas.DatasetCreate, db: Session = Depends(get_db)
     return ds
 
 
-@app.get("/datasets/{dataset_id}", response_model=schemas.DatasetOut)
+@internal_router.get("/datasets/{dataset_id}", response_model=schemas.DatasetOut)
 def get_dataset(dataset_id: str, version: int | None = None, db: Session = Depends(get_db)):
     if version is not None:
         return _get_dataset(db, dataset_id, version)
@@ -78,14 +103,14 @@ def get_dataset(dataset_id: str, version: int | None = None, db: Session = Depen
     return ds
 
 
-@app.get("/datasets/{dataset_id}/versions", response_model=list[schemas.DatasetOut])
+@internal_router.get("/datasets/{dataset_id}/versions", response_model=list[schemas.DatasetOut])
 def list_dataset_versions(dataset_id: str, db: Session = Depends(get_db)):
     return db.execute(
         select(Dataset).where(Dataset.dataset_id == dataset_id).order_by(Dataset.dataset_version)
     ).scalars().all()
 
 
-@app.post("/files", response_model=schemas.FileOut, status_code=201)
+@internal_router.post("/files", response_model=schemas.FileOut, status_code=201)
 def create_file(payload: schemas.FileCreate, db: Session = Depends(get_db)):
     ds = _get_dataset(db, payload.dataset_id, payload.dataset_version)
     f = File(
@@ -105,7 +130,7 @@ def create_file(payload: schemas.FileCreate, db: Session = Depends(get_db)):
     return f
 
 
-@app.get("/files/{file_id}", response_model=schemas.FileOut)
+@internal_router.get("/files/{file_id}", response_model=schemas.FileOut)
 def get_file(file_id: str, db: Session = Depends(get_db)):
     f = db.execute(select(File).where(File.file_id == file_id)).scalar_one_or_none()
     if f is None:
@@ -113,7 +138,7 @@ def get_file(file_id: str, db: Session = Depends(get_db)):
     return f
 
 
-@app.patch("/files/{file_id}", response_model=schemas.FileOut)
+@internal_router.patch("/files/{file_id}", response_model=schemas.FileOut)
 def update_file(file_id: str, payload: schemas.FileUpdate, db: Session = Depends(get_db)):
     f = db.execute(select(File).where(File.file_id == file_id)).scalar_one_or_none()
     if f is None:
@@ -125,7 +150,7 @@ def update_file(file_id: str, payload: schemas.FileUpdate, db: Session = Depends
     return f
 
 
-@app.get("/files", response_model=list[schemas.FileOut])
+@internal_router.get("/files", response_model=list[schemas.FileOut])
 def list_files(dataset_id: str, dataset_version: int | None = None, db: Session = Depends(get_db)):
     q = select(File).join(Dataset).where(Dataset.dataset_id == dataset_id)
     if dataset_version is not None:
@@ -133,7 +158,7 @@ def list_files(dataset_id: str, dataset_version: int | None = None, db: Session 
     return db.execute(q.order_by(File.created_at)).scalars().all()
 
 
-@app.post("/features", response_model=schemas.FeatureOut, status_code=201)
+@internal_router.post("/features", response_model=schemas.FeatureOut, status_code=201)
 def create_feature(payload: schemas.FeatureCreate, db: Session = Depends(get_db)):
     """Register a produced representation. Written once the transform step has
     already run the output-validation gate (§6) — quality_status/detail come
@@ -145,7 +170,7 @@ def create_feature(payload: schemas.FeatureCreate, db: Session = Depends(get_db)
     return feat
 
 
-@app.get("/features/{feature_id}", response_model=schemas.FeatureOut)
+@internal_router.get("/features/{feature_id}", response_model=schemas.FeatureOut)
 def get_feature(feature_id: str, db: Session = Depends(get_db)):
     feat = db.execute(select(Feature).where(Feature.feature_id == feature_id)).scalar_one_or_none()
     if feat is None:
@@ -153,7 +178,7 @@ def get_feature(feature_id: str, db: Session = Depends(get_db)):
     return feat
 
 
-@app.get("/features", response_model=list[schemas.FeatureOut])
+@internal_router.get("/features", response_model=list[schemas.FeatureOut])
 def list_features(
     dataset_id: str | None = None,
     dataset_version: int | None = None,
@@ -201,7 +226,7 @@ def list_features(
     return db.execute(q.order_by(Feature.created_at)).scalars().all()
 
 
-@app.post("/pipelines", response_model=schemas.PipelineOut, status_code=201)
+@internal_router.post("/pipelines", response_model=schemas.PipelineOut, status_code=201)
 def register_pipeline(payload: schemas.PipelineCreate, db: Session = Depends(get_db)):
     existing = db.execute(
         select(Pipeline).where(
@@ -218,12 +243,12 @@ def register_pipeline(payload: schemas.PipelineCreate, db: Session = Depends(get
     return p
 
 
-@app.get("/pipelines", response_model=list[schemas.PipelineOut])
+@internal_router.get("/pipelines", response_model=list[schemas.PipelineOut])
 def list_pipelines(db: Session = Depends(get_db)):
     return db.execute(select(Pipeline).order_by(Pipeline.pipeline_name, Pipeline.pipeline_version)).scalars().all()
 
 
-@app.post("/jobs", response_model=schemas.JobOut, status_code=201)
+@internal_router.post("/jobs", response_model=schemas.JobOut, status_code=201)
 def create_job(payload: schemas.JobCreate, db: Session = Depends(get_db)):
     ds = _get_dataset(db, payload.dataset_id, payload.dataset_version)
     job = Job(
@@ -238,7 +263,7 @@ def create_job(payload: schemas.JobCreate, db: Session = Depends(get_db)):
     return job
 
 
-@app.get("/jobs/{job_id}", response_model=schemas.JobOut)
+@internal_router.get("/jobs/{job_id}", response_model=schemas.JobOut)
 def get_job(job_id: str, db: Session = Depends(get_db)):
     job = db.execute(select(Job).where(Job.job_id == job_id)).scalar_one_or_none()
     if job is None:
@@ -246,7 +271,7 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
     return job
 
 
-@app.patch("/jobs/{job_id}", response_model=schemas.JobOut)
+@internal_router.patch("/jobs/{job_id}", response_model=schemas.JobOut)
 def update_job(job_id: str, payload: schemas.JobUpdate, db: Session = Depends(get_db)):
     job = db.execute(select(Job).where(Job.job_id == job_id)).scalar_one_or_none()
     if job is None:
@@ -256,3 +281,8 @@ def update_job(job_id: str, payload: schemas.JobUpdate, db: Session = Depends(ge
     db.commit()
     db.refresh(job)
     return job
+
+
+# Now that every @internal_router... decorator above has run, the router
+# actually has routes on it — safe to include.
+app.include_router(internal_router)

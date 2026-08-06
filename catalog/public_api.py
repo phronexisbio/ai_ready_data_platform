@@ -1,19 +1,21 @@
-"""Public-facing read-only API — the only surface exposed through the
-Cloudflare Tunnel for the engine.phronexis.bio frontend.
+"""Public-facing API — the only surface exposed through the Cloudflare
+Tunnel for the engine.phronexis.bio frontend (and, as of Phase 13, any other
+customer's server-side integration).
 
-Deliberately separate from the internal CRUD endpoints in api.py: everything
-here is read-only (no POST/PATCH), and protected by a shared-secret API key
-(`X-API-Key` header, checked against the `PUBLIC_API_KEY` env var) so the
-tunnel has exactly one thing to authenticate, not three. Aggregates across
-Postgres, MinIO, and Prometheus internally (all reachable via in-cluster DNS
-from here) so the tunnel only ever needs to expose this one service — the
-frontend never talks to MinIO or Prometheus directly.
+Deliberately separate from the internal CRUD endpoints in api.py: this
+surface is auth-gated per request via a per-customer API key (`X-API-Key`
+header, looked up against the `api_keys` table — see catalog/api_key_auth.py
+and catalog/manage_api_keys.py), not the single shared secret v2 used.
+Aggregates across Postgres, MinIO, and Prometheus internally (all reachable
+via in-cluster DNS from here) so the tunnel only ever needs to expose this
+one service — the frontend never talks to MinIO or Prometheus directly.
 """
 
 import csv
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import time
@@ -31,9 +33,12 @@ from fastapi import File as UploadFileParam
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from catalog.api_key_auth import verify as verify_api_key
 from catalog.db import get_db
 from catalog.hashing import dataset_hash
-from catalog.models import Dataset, Feature, File
+from catalog.models import ApiKey, Dataset, Feature, File
+
+logger = logging.getLogger("catalog.public_api")
 
 def _required_env(name: str) -> str:
     value = os.environ.get(name)
@@ -45,7 +50,6 @@ def _required_env(name: str) -> str:
     return value
 
 
-PUBLIC_API_KEY = os.environ.get("PUBLIC_API_KEY")
 PROMETHEUS_URL = os.environ.get(
     "PROMETHEUS_URL", "http://kube-prometheus-stack-prometheus.data-platform.svc.cluster.local:9090"
 )
@@ -55,10 +59,10 @@ MINIO_SECRET_KEY = _required_env("MINIO_SECRET_KEY")
 ARGO_NAMESPACE = os.environ.get("ARGO_NAMESPACE", "data-platform")
 
 # Public-upload safety limits — this is the one write path the tunnel exposes
-# (indirectly: only reachable through the Next.js server holding
-# PUBLIC_API_KEY, never straight from a browser), so it gets its own,
-# tighter guardrails on top of the shared API-key gate every /public/*
-# endpoint already has.
+# (indirectly: only reachable through the Next.js server holding a valid
+# per-customer API key, never straight from a browser), so it gets its own,
+# tighter guardrails on top of the per-key + per-tenant gates every /public/*
+# write endpoint already has.
 MAX_UPLOAD_BYTES = 512 * 1024  # 512KB — a demo upload, not a bulk loader
 UPLOAD_RATE_LIMIT_MAX = 5
 UPLOAD_RATE_LIMIT_WINDOW_SECONDS = 600  # 5 uploads / 10 min / client
@@ -119,11 +123,33 @@ def _pull_dataset(source: str) -> str:
     return f"public-pull-{source}-{uuid.uuid4().hex[:12]}"
 
 
-def require_api_key(x_api_key: str | None = Header(default=None)):
-    if not PUBLIC_API_KEY:
-        raise HTTPException(500, "PUBLIC_API_KEY not configured on the server")
-    if x_api_key != PUBLIC_API_KEY:
+def require_api_key(x_api_key: str | None = Header(default=None), db: Session = Depends(get_db)) -> ApiKey:
+    """Phase 13 (BUILD_PLAN_COMMERCIAL.md): looks up the key against the
+    api_keys table instead of comparing to one shared secret — every request
+    is now traceable to a specific tenant and individually revocable. FastAPI
+    caches a dependency's result per request, so declaring this again as a
+    parameter on an endpoint (to get the ApiKey back, e.g. for tenant_id)
+    doesn't re-run the lookup."""
+    if not x_api_key:
+        raise HTTPException(401, "missing API key")
+    parts = x_api_key.split("_", 2)
+    if len(parts) != 3:
         raise HTTPException(401, "invalid or missing API key")
+    key_id = parts[1]
+    key = db.execute(select(ApiKey).where(ApiKey.key_id == key_id)).scalar_one_or_none()
+    if key is None or key.revoked_at is not None or not verify_api_key(x_api_key, key.key_hash):
+        raise HTTPException(401, "invalid or missing API key")
+    logger.info("public_api request tenant=%s key_id=%s", key.tenant_id, key.key_id)
+    return key
+
+
+def require_scope(scope: str):
+    def _check(auth: ApiKey = Depends(require_api_key)) -> ApiKey:
+        if scope not in auth.scopes:
+            raise HTTPException(403, f"this API key is not scoped for '{scope}'")
+        return auth
+
+    return _check
 
 
 router = APIRouter(prefix="/public", dependencies=[Depends(require_api_key)])
@@ -150,14 +176,27 @@ def _client_ip(request: Request) -> str:
     return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "unknown")
 
 
-def _check_submission_rate_limit(ip: str) -> None:
+_tenant_submission_timestamps: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(bucket: dict[str, list[float]], key: str, message: str) -> None:
     now = time.monotonic()
     window_start = now - UPLOAD_RATE_LIMIT_WINDOW_SECONDS
-    recent = [t for t in _upload_timestamps[ip] if t >= window_start]
+    recent = [t for t in bucket[key] if t >= window_start]
     if len(recent) >= UPLOAD_RATE_LIMIT_MAX:
-        raise HTTPException(429, "too many uploads from this client — try again later")
+        raise HTTPException(429, message)
     recent.append(now)
-    _upload_timestamps[ip] = recent
+    bucket[key] = recent
+
+
+def _check_submission_rate_limits(request: Request, auth: ApiKey) -> None:
+    """Two independent limits, not one: per-IP (an individual visitor sharing
+    the public-demo tenant's one key with many other visitors) and per-tenant
+    (so no single tenant — including that whole shared demo key — can exceed
+    the aggregate ceiling regardless of how many different IPs it's called
+    from). Phase 13 (BUILD_PLAN_COMMERCIAL.md)."""
+    _check_rate_limit(_upload_timestamps, _client_ip(request), "too many uploads from this client — try again later")
+    _check_rate_limit(_tenant_submission_timestamps, auth.tenant_id, "too many uploads for this API key — try again later")
 
 
 def _submit_workflow(*, file_id: str, source: str, dataset_id: str, dataset_version: int, modality: str, location: str) -> str:
@@ -411,18 +450,24 @@ def source_sync_status(db: Session = Depends(get_db)):
     return [dict(r) for r in rows]
 
 
-def _land_register_submit(*, db: Session, source: str, dataset_id: str, filename: str, content: bytes, modality: str) -> dict:
+def _land_register_submit(*, db: Session, owner: str, source: str, dataset_id: str, filename: str, content: bytes, modality: str) -> dict:
     """Shared by /upload and every /pull/{source} endpoint: land bytes into
     MinIO, register one Dataset + one File row, submit the ingest-validate
     workflow. Each call gets its own fresh dataset_id — these are independent
     submissions, not versions of one manifest, so reusing a dataset_id across
-    them would misrepresent that relationship in the catalog."""
+    them would misrepresent that relationship in the catalog.
+
+    `owner` is the authenticated tenant_id (Phase 13) — real caller identity,
+    distinct from `source`, which stays the connector/method label (geo, s3,
+    public-upload, ...). Ahead of Phase 14's tenant_id schema column, this is
+    what makes a Dataset traceable to who actually submitted it, not just how.
+    """
     manifest = {"files": [filename]}
     ds = Dataset(
         dataset_id=dataset_id,
         dataset_version=1,
         dataset_hash=dataset_hash(manifest),
-        owner=source,
+        owner=owner,
         source=source,
         manifest=manifest,
     )
@@ -468,10 +513,11 @@ async def upload_file(
     request: Request,
     file: UploadFile = UploadFileParam(...),
     db: Session = Depends(get_db),
+    auth: ApiKey = Depends(require_scope("write")),
 ):
     """Land a visitor-submitted file through the real ingest -> validate ->
     transform pipeline and return a workflow name the frontend can poll."""
-    _check_submission_rate_limit(_client_ip(request))
+    _check_submission_rate_limits(request, auth)
 
     filename = file.filename or "upload"
     suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -489,22 +535,23 @@ async def upload_file(
         raise HTTPException(400, "empty file")
 
     return _land_register_submit(
-        db=db, source="public-upload", dataset_id=f"public-upload-{uuid.uuid4().hex[:12]}", filename=filename, content=content, modality=modality
+        db=db, owner=auth.tenant_id, source="public-upload", dataset_id=f"public-upload-{uuid.uuid4().hex[:12]}", filename=filename, content=content, modality=modality
     )
 
 
-def _land_register_submit_batch(*, db: Session, source: str, dataset_id: str, items: list[tuple[str, bytes, str]]) -> dict:
+def _land_register_submit_batch(*, db: Session, owner: str, source: str, dataset_id: str, items: list[tuple[str, bytes, str]]) -> dict:
     """Batch counterpart to _land_register_submit: one Dataset version covering
     every file in the batch (mirroring how connectors/base.py's Connector.run()
     registers one Dataset version + one File row per landed file for a single
     sync), rather than a separate Dataset per file the way single-file /upload
-    does — a batch is genuinely one submission, not N independent ones."""
+    does — a batch is genuinely one submission, not N independent ones. See
+    _land_register_submit's docstring for why `owner` and `source` differ."""
     manifest = {"files": [filename for filename, _, _ in items]}
     ds = Dataset(
         dataset_id=dataset_id,
         dataset_version=1,
         dataset_hash=dataset_hash(manifest),
-        owner=source,
+        owner=owner,
         source=source,
         manifest=manifest,
     )
@@ -550,12 +597,13 @@ async def upload_batch(
     request: Request,
     files: list[UploadFile] = UploadFileParam(...),
     db: Session = Depends(get_db),
+    auth: ApiKey = Depends(require_scope("write")),
 ):
     """Land multiple visitor-submitted files as one dataset in a single request,
     each through the real ingest -> validate -> transform pipeline. Counts as one
     submission against the rate limiter (like /pull/*) since charging a batch of
     N files N budget slots would defeat the point of having this endpoint."""
-    _check_submission_rate_limit(_client_ip(request))
+    _check_submission_rate_limits(request, auth)
 
     if not files:
         raise HTTPException(400, "no files provided")
@@ -596,6 +644,7 @@ async def upload_batch(
 
     result = _land_register_submit_batch(
         db=db,
+        owner=auth.tenant_id,
         source="public-upload",
         dataset_id=f"public-upload-batch-{uuid.uuid4().hex[:12]}",
         items=valid,
@@ -688,28 +737,28 @@ def _fetch_ftp(path: str) -> tuple[bytes, str]:
 
 
 @router.post("/pull/geo")
-def pull_geo(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
-    _check_submission_rate_limit(_client_ip(request))
+def pull_geo(request: Request, body: dict = Body(...), db: Session = Depends(get_db), auth: ApiKey = Depends(require_scope("write"))):
+    _check_submission_rate_limits(request, auth)
     accession = str(body.get("accession", "")).strip().upper()
     if not GEO_ACCESSION_RE.match(accession):
         raise HTTPException(400, "accession must look like GSE12345, GSM123, GPL96, or GDS858")
     content, filename = _fetch_geo(accession)
-    return _land_register_submit(db=db, source="geo", dataset_id=_pull_dataset("geo"), filename=filename, content=content, modality="tabular")
+    return _land_register_submit(db=db, owner=auth.tenant_id, source="geo", dataset_id=_pull_dataset("geo"), filename=filename, content=content, modality="tabular")
 
 
 @router.post("/pull/sra")
-def pull_sra(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
-    _check_submission_rate_limit(_client_ip(request))
+def pull_sra(request: Request, body: dict = Body(...), db: Session = Depends(get_db), auth: ApiKey = Depends(require_scope("write"))):
+    _check_submission_rate_limits(request, auth)
     accession = str(body.get("accession", "")).strip().upper()
     if not SRA_ACCESSION_RE.match(accession):
         raise HTTPException(400, "accession must be 3-20 alphanumeric characters, e.g. SRR000001")
     content, filename = _fetch_sra(accession)
-    return _land_register_submit(db=db, source="sra", dataset_id=_pull_dataset("sra"), filename=filename, content=content, modality="tabular")
+    return _land_register_submit(db=db, owner=auth.tenant_id, source="sra", dataset_id=_pull_dataset("sra"), filename=filename, content=content, modality="tabular")
 
 
 @router.post("/pull/s3")
-def pull_s3(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
-    _check_submission_rate_limit(_client_ip(request))
+def pull_s3(request: Request, body: dict = Body(...), db: Session = Depends(get_db), auth: ApiKey = Depends(require_scope("write"))):
+    _check_submission_rate_limits(request, auth)
     bucket = str(body.get("bucket", "")).strip().lower()
     key = str(body.get("key", "")).strip()
     if not S3_BUCKET_RE.match(bucket):
@@ -719,19 +768,19 @@ def pull_s3(request: Request, body: dict = Body(...), db: Session = Depends(get_
     content, filename = _fetch_s3(bucket, key)
     suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     modality = MODALITY_BY_SUFFIX.get(suffix, "text")  # anonymous public objects rarely have a recognized extension
-    return _land_register_submit(db=db, source="s3", dataset_id=_pull_dataset("s3"), filename=filename, content=content, modality=modality)
+    return _land_register_submit(db=db, owner=auth.tenant_id, source="s3", dataset_id=_pull_dataset("s3"), filename=filename, content=content, modality=modality)
 
 
 @router.post("/pull/ftp")
-def pull_ftp(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
-    _check_submission_rate_limit(_client_ip(request))
+def pull_ftp(request: Request, body: dict = Body(...), db: Session = Depends(get_db), auth: ApiKey = Depends(require_scope("write"))):
+    _check_submission_rate_limits(request, auth)
     path = str(body.get("path", "")).strip()
     if not FTP_PATH_RE.match(path):
         raise HTTPException(400, f"path must start with / and be a plain path on {FTP_HOST}")
     content, filename = _fetch_ftp(path)
     suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     modality = MODALITY_BY_SUFFIX.get(suffix, "text")
-    return _land_register_submit(db=db, source="ftp", dataset_id=_pull_dataset("ftp"), filename=filename, content=content, modality=modality)
+    return _land_register_submit(db=db, owner=auth.tenant_id, source="ftp", dataset_id=_pull_dataset("ftp"), filename=filename, content=content, modality=modality)
 
 
 @router.get("/uploads/{file_id}/status")

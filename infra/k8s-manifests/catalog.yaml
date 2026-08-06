@@ -25,8 +25,7 @@ spec:
           env:
             # DATABASE_URL / MinIO creds: Phase 12 (BUILD_PLAN_COMMERCIAL.md) moved
             # these out of plaintext values into Secrets created imperatively
-            # (`kubectl create secret ...`), never committed to git — same
-            # pattern as PUBLIC_API_KEY below, now applied everywhere.
+            # (`kubectl create secret ...`), never committed to git.
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -46,15 +45,17 @@ spec:
                 secretKeyRef:
                   name: minio-credentials
                   key: rootPassword
-            # Protects catalog/public_api.py's /public/* endpoints — the only
-            # surface exposed through the Cloudflare Tunnel. Value lives in a
-            # Secret created imperatively (`kubectl create secret ...`), never
-            # committed to git — see CLAUDE.md's frontend section.
-            - name: PUBLIC_API_KEY
+            # Phase 13 (BUILD_PLAN_COMMERCIAL.md): the shared secret every
+            # internal caller (connectors, engine steps, via CatalogClient)
+            # must present to catalog/api.py's internal_router. Replaces the
+            # old single PUBLIC_API_KEY, which /public/* no longer uses at
+            # all — public callers now authenticate with per-customer keys
+            # looked up in the api_keys table (catalog/manage_api_keys.py).
+            - name: INTERNAL_API_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: catalog-public-api-key
-                  key: PUBLIC_API_KEY
+                  name: catalog-internal-api-secret
+                  key: INTERNAL_API_SECRET
           readinessProbe:
             httpGet:
               path: /health

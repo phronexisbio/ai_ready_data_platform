@@ -45,3 +45,11 @@ spec:
               value: nats://nats.data-platform.svc.cluster.local:4222
             - name: CATALOG_URL
               value: http://catalog.data-platform.svc.cluster.local:8000
+            # Phase 13 (BUILD_PLAN_COMMERCIAL.md): required by CatalogClient's
+            # X-Internal-Secret header — catalog/api.py's internal_router
+            # rejects requests without it.
+            - name: INTERNAL_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-internal-api-secret
+                  key: INTERNAL_API_SECRET

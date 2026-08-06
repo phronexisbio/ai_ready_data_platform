@@ -133,3 +133,23 @@ class Job(Base):
     content_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ApiKey(Base):
+    """A per-customer API key for the /public/* surface — BUILD_PLAN_COMMERCIAL.md
+    Phase 13. Replaces the single shared PUBLIC_API_KEY so every request is
+    traceable to a specific tenant and individually revocable without
+    affecting any other tenant's key. `key_hash` is a SHA-256 of the secret
+    half of the key (see catalog/api_key_auth.py) — the raw key is shown once
+    at creation and never stored anywhere."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    key_id: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    key_hash: Mapped[str] = mapped_column(String, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    scopes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    label: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

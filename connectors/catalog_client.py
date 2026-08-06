@@ -4,12 +4,31 @@ import os
 
 import requests
 
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(
+            f"{name} is not set — Phase 13 (BUILD_PLAN_COMMERCIAL.md) added internal-API "
+            f"authentication; wire it from the catalog-internal-api-secret Secret."
+        )
+    return value
+
+
 CATALOG_URL = os.environ.get("CATALOG_URL", "http://catalog.data-platform.svc.cluster.local:8000")
+INTERNAL_API_SECRET = _required_env("INTERNAL_API_SECRET")
 
 
 class CatalogClient:
+    """Every request carries X-Internal-Secret (Phase 13) — the internal
+    endpoints in catalog/api.py reject anything without it. A requests.Session
+    with a default header means every method below gets this for free without
+    repeating it at each call site."""
+
     def __init__(self, base_url: str = CATALOG_URL):
         self.base_url = base_url.rstrip("/")
+        self._session = requests.Session()
+        self._session.headers["X-Internal-Secret"] = INTERNAL_API_SECRET
 
     def create_dataset(
         self,
@@ -20,7 +39,7 @@ class CatalogClient:
         license: str | None = None,
         schema_version: str = "1",
     ) -> dict:
-        r = requests.post(
+        r = self._session.post(
             f"{self.base_url}/datasets",
             json={
                 "dataset_id": dataset_id,
@@ -50,7 +69,7 @@ class CatalogClient:
         quality_checks_passed: list[str] | None = None,
         quality_detail: str | None = None,
     ) -> dict:
-        r = requests.post(
+        r = self._session.post(
             f"{self.base_url}/features",
             json={
                 "source_file_id": source_file_id,
@@ -75,7 +94,7 @@ class CatalogClient:
         """Content-addressed cache lookup (BUILD_PLAN §10 Phase 5). Returns the
         earliest matching Feature — same key always means the same result, so
         which matching row comes back doesn't change correctness — or None."""
-        r = requests.get(
+        r = self._session.get(
             f"{self.base_url}/features",
             params={
                 "source_hash": source_hash,
@@ -119,12 +138,12 @@ class CatalogClient:
             }.items()
             if v is not None
         }
-        r = requests.get(f"{self.base_url}/features", params=params, timeout=30)
+        r = self._session.get(f"{self.base_url}/features", params=params, timeout=30)
         r.raise_for_status()
         return r.json()
 
     def get_file(self, file_id: str) -> dict:
-        r = requests.get(f"{self.base_url}/files/{file_id}", timeout=30)
+        r = self._session.get(f"{self.base_url}/files/{file_id}", timeout=30)
         r.raise_for_status()
         return r.json()
 
@@ -132,7 +151,7 @@ class CatalogClient:
         params = {"dataset_id": dataset_id}
         if dataset_version is not None:
             params["dataset_version"] = dataset_version
-        r = requests.get(f"{self.base_url}/files", params=params, timeout=30)
+        r = self._session.get(f"{self.base_url}/files", params=params, timeout=30)
         r.raise_for_status()
         return r.json()
 
@@ -150,7 +169,7 @@ class CatalogClient:
             payload["status_detail"] = status_detail
         if location is not None:
             payload["location"] = location
-        r = requests.patch(f"{self.base_url}/files/{file_id}", json=payload, timeout=30)
+        r = self._session.patch(f"{self.base_url}/files/{file_id}", json=payload, timeout=30)
         r.raise_for_status()
         return r.json()
 
@@ -164,7 +183,7 @@ class CatalogClient:
         location: str,
         **extra,
     ) -> dict:
-        r = requests.post(
+        r = self._session.post(
             f"{self.base_url}/files",
             json={
                 "dataset_id": dataset_id,
